@@ -1,6 +1,7 @@
 namespace MveTools.Cli
 {
 	using System;
+	using Localization;
 
 	internal static class HelpPrinter
 	{

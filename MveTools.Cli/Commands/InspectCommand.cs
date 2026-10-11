@@ -1,7 +1,8 @@
-namespace MveTools.Cli
+namespace MveTools.Cli.Commands
 {
 	using System;
 	using MveTools.Inspection;
+	using Localization;
 
 	internal static class InspectCommand
 	{

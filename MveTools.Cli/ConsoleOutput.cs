@@ -7,9 +7,10 @@ namespace MveTools.Cli
 	using System.Linq;
 	using System.Runtime.InteropServices;
 	using System.Text;
+	using Spectre.Console;
 	using MveTools.Conversion;
 	using MveTools.Inspection;
-	using Spectre.Console;
+	using Localization;
 
 	internal static class ConsoleOutput
 	{

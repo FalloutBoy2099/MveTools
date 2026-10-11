@@ -2,6 +2,8 @@ namespace MveTools.Cli
 {
 	using System;
 	using System.Threading.Tasks;
+	using Commands;
+	using Localization;
 
 	internal static class Program
 	{

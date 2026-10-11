@@ -7,6 +7,7 @@ namespace MveTools.Cli
 	using Spectre.Console;
 	using MveTools.Conversion;
 	using MveTools.Inspection;
+	using Localization;
 
 	internal static class InteractiveMenu
 	{

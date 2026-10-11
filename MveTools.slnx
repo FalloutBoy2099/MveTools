@@ -1,5 +1,4 @@
 <Solution>
   <Project Path="MveTools.Cli/MveTools.Cli.csproj" />
   <Project Path="MveTools/MveTools.csproj" />
-  <Project Path="MveTools.Tests/MveTools.Tests.csproj" />
 </Solution>

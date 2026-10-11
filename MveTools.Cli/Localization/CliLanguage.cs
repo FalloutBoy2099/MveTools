@@ -1,4 +1,4 @@
-namespace MveTools.Cli
+namespace MveTools.Cli.Localization
 {
 	internal enum CliLanguage
 	{

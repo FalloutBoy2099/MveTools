@@ -1,8 +1,9 @@
-namespace MveTools.Cli
+namespace MveTools.Cli.Commands
 {
 	using System;
 	using System.Threading.Tasks;
 	using MveTools.Conversion;
+	using Localization;
 
 	internal static class ToMveCommand
 	{
