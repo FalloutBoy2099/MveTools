@@ -10,11 +10,7 @@ namespace MveTools.Audio
 		public void Write(String path, PcmAudioTrack audio)
 		{
 			PcmAudioTrack pcm = audio.To16Bit();
-			String? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-			if (!String.IsNullOrWhiteSpace(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
+			FileSystemHelper.EnsureParentDirectory(path);
 
 			using FileStream stream = File.Create(path);
 			using BinaryWriter writer = new(stream);

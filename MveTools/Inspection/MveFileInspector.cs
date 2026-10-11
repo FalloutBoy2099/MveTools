@@ -4,11 +4,12 @@ namespace MveTools.Inspection
 	using System.Buffers.Binary;
 	using System.Collections.Generic;
 	using System.IO;
+	using Mve;
 
 	public sealed class MveFileInspector
 	{
-		public const String HeaderText = "Interplay MVE File";
-		public static readonly Byte[] ExpectedMagicWords = [0x1A, 0x00, 0x00, 0x01, 0x33, 0x11];
+		public const String HeaderText = MveFormat.HeaderText;
+		public static readonly Byte[] ExpectedMagicWords = MveFormat.MagicWords;
 
 		public MveFileInfo Inspect(String path)
 		{
@@ -21,7 +22,7 @@ namespace MveTools.Inspection
 			using BinaryReader reader = new(stream);
 
 			Byte[] headerBytes = reader.ReadBytes(20);
-			Byte[] expectedHeader = System.Text.Encoding.ASCII.GetBytes(HeaderText + "\x1A\0");
+			Byte[] expectedHeader = MveFormat.CreateHeaderBytes();
 			if (headerBytes.Length != 20 || !headerBytes.SequenceEqual(expectedHeader))
 			{
 				throw new InvalidDataException("The file does not start with an Interplay MVE header.");

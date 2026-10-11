@@ -7,13 +7,18 @@ namespace MveTools.Conversion
 	using System.Threading.Tasks;
 	using Audio;
 	using Avi;
+	using IO;
 	using Media;
 	using Mp4;
 	using Mve;
 
 	public sealed class MveConverter
 	{
-		private readonly record struct SourceVideoReadResult(IndexedVideo Video, String Step);
+		/// <summary>Whether <paramref name="path"/> has an extension accepted as a video-to-MVE source.</summary>
+		public static Boolean IsSupportedVideoSource(String path)
+		{
+			return VideoSourceReader.IsAvi(path) || VideoSourceReader.IsFfmpegVideoSource(path);
+		}
 
 		public Task<ConversionResult> ConvertMveToVideoAsync(
 			String inputMvePath,
@@ -47,6 +52,45 @@ namespace MveTools.Conversion
 			return Task.FromResult(result);
 		}
 
+		public Task<ConversionResult> ConvertVideoToMveAsync(
+			String inputVideoPath,
+			String outputMvePath,
+			VideoToMveOptions? options = null,
+			CancellationToken cancellationToken = default)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			options ??= new VideoToMveOptions();
+			RgbColor[]? customPalette = ValidateInputs(inputVideoPath, outputMvePath, options);
+
+			VideoSourceReader.Result source = VideoSourceReader.ReadVideo(inputVideoPath, customPalette, options.UseFloydSteinbergDither);
+			IndexedVideo video = ApplySelection(source.Video, options);
+			video = ApplyOverrides(video, options);
+
+			if (!String.IsNullOrWhiteSpace(options.SavePalettePath))
+			{
+				PaletteFile.WriteAct(options.SavePalettePath, video.Palette);
+			}
+
+			List<String> steps = DescribeSelection(source.Step, video, options);
+			video = EnsureMveCompatibleDimensions(video, steps);
+			AddConversionIntentSteps(steps, options);
+
+			if (options.TestOnly)
+			{
+				steps.Add("Test mode: input and parameters validated; MVE writing skipped.");
+			}
+			else
+			{
+				video = WriteMveWithSizeFallback(outputMvePath, video, steps);
+				EnsureProducedFile(outputMvePath);
+				steps.Add(video.Audio is null
+					? "Wrote compressed Interplay MVE 0x11 video without audio and without external tools"
+					: "Wrote compressed Interplay MVE 0x11 video with MVE DPCM audio without external tools");
+			}
+
+			return Task.FromResult(new ConversionResult(outputMvePath, steps));
+		}
+
 		private static String WriteAviIndexed(String outputPath, IndexedVideo video)
 		{
 			new AviDibWriter().Write(outputPath, video);
@@ -76,14 +120,9 @@ namespace MveTools.Conversion
 			return $"Wrote MP4/H.264 with system FFmpeg using CRF {quality}";
 		}
 
-		public Task<ConversionResult> ConvertVideoToMveAsync(
-			String inputVideoPath,
-			String outputMvePath,
-			VideoToMveOptions? options = null,
-			CancellationToken cancellationToken = default)
+		/// <summary>Checks every file the conversion needs and returns the custom palette, if any.</summary>
+		private static RgbColor[]? ValidateInputs(String inputVideoPath, String outputMvePath, VideoToMveOptions options)
 		{
-			cancellationToken.ThrowIfCancellationRequested();
-			options ??= new VideoToMveOptions();
 			EnsureInputFile(inputVideoPath);
 			if (!options.TestOnly)
 			{
@@ -95,30 +134,42 @@ namespace MveTools.Conversion
 				EnsureInputFile(options.AudioSourcePath, "audio source");
 			}
 
-			RgbColor[]? customPalette = null;
-			if (!String.IsNullOrWhiteSpace(options.PalettePath))
+			if (String.IsNullOrWhiteSpace(options.PalettePath))
 			{
-				EnsureInputFile(options.PalettePath, "palette");
-				customPalette = PaletteFile.Read(options.PalettePath);
+				return null;
 			}
 
-			SourceVideoReadResult source = ReadSourceVideo(inputVideoPath, customPalette, options.UseFloydSteinbergDither);
-			IndexedVideo video = source.Video;
+			EnsureInputFile(options.PalettePath, "palette");
+			return PaletteFile.Read(options.PalettePath);
+		}
+
+		/// <summary>Applies the external audio, the frame range and the audio on/off/sample-rate options.</summary>
+		private static IndexedVideo ApplySelection(IndexedVideo video, VideoToMveOptions options)
+		{
 			if (!String.IsNullOrWhiteSpace(options.AudioSourcePath))
 			{
-				video = WithAudio(video, ReadExternalAudio(options.AudioSourcePath));
+				video = VideoEditing.WithAudio(video, VideoSourceReader.ReadExternalAudio(options.AudioSourcePath));
 			}
 
-			video = SliceVideo(video, options);
-			if (!options.IncludeAudio && video.Audio is not null)
+			video = VideoEditing.Slice(video, options.StartFrame, options.EndFrame, options.FrameCount);
+			if (video.Audio is null)
 			{
-				video = new IndexedVideo(video.Width, video.Height, video.FrameRate, video.Palette, video.Frames);
-			}
-			else if (options.IncludeAudio && video.Audio is not null && video.Audio.SampleRate != options.AudioSampleRate)
-			{
-				video = WithAudio(video, ResampleAudio(video.Audio, options.AudioSampleRate));
+				return video;
 			}
 
+			if (!options.IncludeAudio)
+			{
+				return VideoEditing.WithAudio(video, null);
+			}
+
+			return video.Audio.SampleRate != options.AudioSampleRate
+				? VideoEditing.WithAudio(video, AudioEditing.Resample(video.Audio, options.AudioSampleRate))
+				: video;
+		}
+
+		/// <summary>Validates the requested width/height (no rescaling yet) and applies the frame-rate override.</summary>
+		private static IndexedVideo ApplyOverrides(IndexedVideo video, VideoToMveOptions options)
+		{
 			if (options.Width.HasValue && video.Width != options.Width.Value)
 			{
 				throw new NotSupportedException("The integrated AVI reader does not rescale yet. Provide an AVI with the requested width.");
@@ -129,19 +180,16 @@ namespace MveTools.Conversion
 				throw new NotSupportedException("The integrated AVI reader does not rescale yet. Provide an AVI with the requested height.");
 			}
 
-			if (options.FrameRate.HasValue && Math.Abs(video.FrameRate - options.FrameRate.Value) > 0.001d)
-			{
-				video = new IndexedVideo(video.Width, video.Height, options.FrameRate.Value, video.Palette, video.Frames, video.Audio);
-			}
+			return options.FrameRate.HasValue && Math.Abs(video.FrameRate - options.FrameRate.Value) > 0.001d
+				? VideoEditing.WithFrameRate(video, options.FrameRate.Value)
+				: video;
+		}
 
-			if (!String.IsNullOrWhiteSpace(options.SavePalettePath))
-			{
-				PaletteFile.WriteAct(options.SavePalettePath, video.Palette);
-			}
-
-			List<String> steps =
+		private static List<String> DescribeSelection(String sourceStep, IndexedVideo video, VideoToMveOptions options)
+		{
+			return
 			[
-				source.Step,
+				sourceStep,
 				$"Detected source video profile: {video.Width}x{video.Height} at {video.FrameRate:0.###} fps",
 				$"Selected frame range: {video.Frames.Count} frame(s)",
 				options.IncludeAudio && video.Audio is not null
@@ -149,8 +197,10 @@ namespace MveTools.Conversion
 					: "Selected audio: none",
 				$"Compression profile: {options.CompressionMode}"
 			];
-			video = EnsureMveCompatibleDimensions(video, steps);
+		}
 
+		private static void AddConversionIntentSteps(List<String> steps, VideoToMveOptions options)
+		{
 			if (options.BitRateKilobytesPerSecond.HasValue)
 			{
 				steps.Add($"Bitrate target requested: {options.BitRateKilobytesPerSecond.Value} KiB/s (recorded as conversion intent; integrated encoder stays lossless per block).");
@@ -160,26 +210,9 @@ namespace MveTools.Conversion
 			{
 				steps.Add($"Size limit requested: {options.SizeLimitMegabytes.Value:0.###} MiB (recorded as conversion intent; integrated encoder stays lossless per block).");
 			}
-
-			if (options.TestOnly)
-			{
-				steps.Add("Test mode: input and parameters validated; MVE writing skipped.");
-			}
-			else
-			{
-				video = WriteMveWithSizeFallback(outputMvePath, video, steps);
-				EnsureProducedFile(outputMvePath);
-				steps.Add(video.Audio is null
-					? "Wrote compressed Interplay MVE 0x11 video without audio and without external tools"
-					: "Wrote compressed Interplay MVE 0x11 video with MVE DPCM audio without external tools");
-			}
-
-			ConversionResult result = new(
-				outputMvePath,
-				steps);
-			return Task.FromResult(result);
 		}
 
+		/// <summary>Writes the MVE, halving the video size until every compressed frame fits in the 16-bit payload limit.</summary>
 		private static IndexedVideo WriteMveWithSizeFallback(String outputMvePath, IndexedVideo source, List<String> steps)
 		{
 			IndexedVideo current = source;
@@ -190,7 +223,7 @@ namespace MveTools.Conversion
 					new MveWriter().Write(outputMvePath, current);
 					return current;
 				}
-				catch (NotSupportedException ex) when (ex.Message.StartsWith("Compressed MVE frame is too large", StringComparison.Ordinal))
+				catch (MveFrameTooLargeException)
 				{
 					if (File.Exists(outputMvePath))
 					{
@@ -209,85 +242,27 @@ namespace MveTools.Conversion
 			}
 		}
 
-		private static IndexedVideo EnsureMveCompatibleDimensions(IndexedVideo video, List<String>? steps)
+		private static IndexedVideo EnsureMveCompatibleDimensions(IndexedVideo video, List<String> steps)
 		{
-			Int32 width = AlignDownTo8(video.Width);
-			Int32 height = AlignDownTo8(video.Height);
+			Int32 width = VideoEditing.AlignDownToBlock(video.Width);
+			Int32 height = VideoEditing.AlignDownToBlock(video.Height);
 			if (width == video.Width && height == video.Height)
 			{
 				return video;
 			}
 
-			IndexedVideo resized = ResizeVideo(video, width, height);
-			steps?.Add($"Adjusted video dimensions from {video.Width}x{video.Height} to {resized.Width}x{resized.Height} so MVE blocks stay aligned to 8 pixels.");
+			IndexedVideo resized = VideoEditing.Resize(video, width, height);
+			steps.Add($"Adjusted video dimensions from {video.Width}x{video.Height} to {resized.Width}x{resized.Height} so MVE blocks stay aligned to 8 pixels.");
 			return resized;
 		}
 
 		private static IndexedVideo ResizeForMvePayloadLimit(IndexedVideo video)
 		{
-			Int32 width = AlignDownTo8(Math.Max(8, video.Width / 2));
-			Int32 height = AlignDownTo8(Math.Max(8, video.Height / 2));
-			if (width == video.Width && height == video.Height)
-			{
-				return video;
-			}
-
-			return ResizeVideo(video, width, height);
-		}
-
-		private static IndexedVideo ResizeVideo(IndexedVideo video, Int32 width, Int32 height)
-		{
-			List<IndexedVideoFrame> frames = [];
-			foreach (IndexedVideoFrame frame in video.Frames)
-			{
-				Byte[] pixels = new Byte[width * height];
-				for (Int32 y = 0; y < height; y++)
-				{
-					Int32 sourceY = Math.Min(frame.Height - 1, y * frame.Height / height);
-					for (Int32 x = 0; x < width; x++)
-					{
-						Int32 sourceX = Math.Min(frame.Width - 1, x * frame.Width / width);
-						pixels[y * width + x] = frame.Pixels[sourceY * frame.Width + sourceX];
-					}
-				}
-
-				frames.Add(new IndexedVideoFrame(width, height, pixels));
-			}
-
-			return new IndexedVideo(width, height, video.FrameRate, video.Palette, frames, video.Audio);
-		}
-
-		private static Int32 AlignDownTo8(Int32 value)
-		{
-			return Math.Max(8, value & ~7);
-		}
-
-		private static IndexedVideo WithAudio(IndexedVideo video, PcmAudioTrack audio)
-		{
-			return new IndexedVideo(video.Width, video.Height, video.FrameRate, video.Palette, video.Frames, audio);
-		}
-
-		private static PcmAudioTrack ResampleAudio(PcmAudioTrack audio, Int32 sampleRate)
-		{
-			if (sampleRate <= 0)
-			{
-				throw new ArgumentOutOfRangeException(nameof(sampleRate));
-			}
-
-			if (audio.SampleRate == sampleRate || audio.SampleCount == 0)
-			{
-				return audio;
-			}
-
-			Int32 targetSampleCount = Math.Max(1, (Int32)Math.Round(audio.SampleCount * sampleRate / (Double)audio.SampleRate));
-			Byte[] samples = new Byte[targetSampleCount * audio.BlockAlign];
-			for (Int32 targetSample = 0; targetSample < targetSampleCount; targetSample++)
-			{
-				Int32 sourceSample = Math.Min(audio.SampleCount - 1, (Int32)Math.Round(targetSample * audio.SampleRate / (Double)sampleRate));
-				Buffer.BlockCopy(audio.Samples, sourceSample * audio.BlockAlign, samples, targetSample * audio.BlockAlign, audio.BlockAlign);
-			}
-
-			return new PcmAudioTrack(sampleRate, audio.Channels, audio.BitsPerSample, samples);
+			Int32 width = VideoEditing.AlignDownToBlock(Math.Max(VideoEditing.MveBlockSize, video.Width / 2));
+			Int32 height = VideoEditing.AlignDownToBlock(Math.Max(VideoEditing.MveBlockSize, video.Height / 2));
+			return width == video.Width && height == video.Height
+				? video
+				: VideoEditing.Resize(video, width, height);
 		}
 
 		private static void EnsureMp4Quality(Int32 quality)
@@ -296,115 +271,6 @@ namespace MveTools.Conversion
 			{
 				throw new ArgumentOutOfRangeException(nameof(quality), "MP4/H.264 quality must be a CRF value between 0 and 51.");
 			}
-		}
-
-		private static PcmAudioTrack ReadExternalAudio(String path)
-		{
-			String extension = Path.GetExtension(path).ToLowerInvariant();
-			if (extension == ".wav")
-			{
-				return new WavPcmReader().Read(path);
-			}
-
-			if (extension == ".avi")
-			{
-				IndexedVideo source = new AviDibReader().Read(path);
-				return source.Audio ?? throw new NotSupportedException("The external AVI does not contain supported PCM audio.");
-			}
-
-			throw new NotSupportedException("Integrated external audio supports PCM WAV and uncompressed AVI PCM audio.");
-		}
-
-		private static SourceVideoReadResult ReadSourceVideo(String inputPath, RgbColor[]? customPalette, Boolean useFloydSteinbergDither)
-		{
-			AviReadOptions readOptions = new()
-			{
-				Palette = customPalette,
-				UseFloydSteinbergDither = useFloydSteinbergDither
-			};
-
-			if (IsAvi(inputPath))
-			{
-				return new SourceVideoReadResult(
-					new AviDibReader().Read(inputPath, readOptions),
-					"Read AVI DIB and PCM audio with integrated reader");
-			}
-
-			if (!IsFfmpegVideoSource(inputPath))
-			{
-				throw new NotSupportedException("Video to MVE supports uncompressed AVI and FFmpeg-readable MP4/M4V/MOV sources.");
-			}
-
-			String tempDirectory = Path.Combine(Path.GetTempPath(), $"mvetools-{Guid.NewGuid():N}");
-			Directory.CreateDirectory(tempDirectory);
-			String tempAviPath = Path.Combine(tempDirectory, "source.avi");
-			try
-			{
-				new SystemFfmpegVideoTranscoder().TranscodeToUncompressedAvi(inputPath, tempAviPath);
-				return new SourceVideoReadResult(
-					new AviDibReader().Read(tempAviPath, readOptions),
-					"Converted source video to temporary uncompressed AVI with system FFmpeg and read it with integrated reader");
-			}
-			finally
-			{
-				TryDeleteDirectory(tempDirectory);
-			}
-		}
-
-		private static Boolean IsAvi(String path)
-		{
-			return String.Equals(Path.GetExtension(path), ".avi", StringComparison.OrdinalIgnoreCase);
-		}
-
-		private static Boolean IsFfmpegVideoSource(String path)
-		{
-			String extension = Path.GetExtension(path).ToLowerInvariant();
-			return extension is ".mp4" or ".m4v" or ".mov";
-		}
-
-		private static IndexedVideo SliceVideo(IndexedVideo video, VideoToMveOptions options)
-		{
-			Int32 start = Math.Max(0, options.StartFrame ?? 0);
-			Int32 end = video.Frames.Count - 1;
-			if (options.EndFrame.HasValue)
-			{
-				end = Math.Min(end, options.EndFrame.Value);
-			}
-
-			if (options.FrameCount.HasValue)
-			{
-				end = Math.Min(end, start + options.FrameCount.Value - 1);
-			}
-
-			if (start == 0 && end == video.Frames.Count - 1)
-			{
-				return video;
-			}
-
-			if (start > end || start >= video.Frames.Count)
-			{
-				throw new ArgumentOutOfRangeException(nameof(options), "The selected frame range is empty.");
-			}
-
-			List<IndexedVideoFrame> frames = [];
-			for (Int32 i = start; i <= end; i++)
-			{
-				frames.Add(video.Frames[i]);
-			}
-
-			PcmAudioTrack? audio = video.Audio is null ? null : SliceAudio(video.Audio, video.FrameRate, start, frames.Count);
-			return new IndexedVideo(video.Width, video.Height, video.FrameRate, video.Palette, frames, audio);
-		}
-
-		private static PcmAudioTrack SliceAudio(PcmAudioTrack audio, Double frameRate, Int32 startFrame, Int32 frameCount)
-		{
-			Int32 startSample = (Int32)Math.Round(startFrame * audio.SampleRate / frameRate);
-			Int32 sampleCount = (Int32)Math.Round(frameCount * audio.SampleRate / frameRate);
-			Int32 startByte = Math.Min(audio.Samples.Length, startSample * audio.BlockAlign);
-			Int32 byteCount = Math.Min(audio.Samples.Length - startByte, sampleCount * audio.BlockAlign);
-			Byte[] samples = new Byte[byteCount];
-			Buffer.BlockCopy(audio.Samples, startByte, samples, 0, byteCount);
-			return new PcmAudioTrack(audio.SampleRate, audio.Channels, audio.BitsPerSample, samples);
 		}
 
 		private static void EnsureInputFile(String path, String label = "input")
@@ -417,11 +283,7 @@ namespace MveTools.Conversion
 
 		private static void EnsureOutputCanBeWritten(String path, Boolean overwrite)
 		{
-			String? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-			if (!String.IsNullOrWhiteSpace(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
+			FileSystemHelper.EnsureParentDirectory(path);
 
 			if (!overwrite && File.Exists(path))
 			{
@@ -435,23 +297,6 @@ namespace MveTools.Conversion
 			if (!file.Exists || file.Length == 0)
 			{
 				throw new FileNotFoundException($"The expected output file was not produced: {path}", path);
-			}
-		}
-
-		private static void TryDeleteDirectory(String path)
-		{
-			try
-			{
-				if (Directory.Exists(path))
-				{
-					Directory.Delete(path, true);
-				}
-			}
-			catch (IOException)
-			{
-			}
-			catch (UnauthorizedAccessException)
-			{
 			}
 		}
 	}

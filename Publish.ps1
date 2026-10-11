@@ -1,6 +1,7 @@
 param(
 	[String]$Configuration = "Release",
-	[String]$RuntimeIdentifier = "win-x64",
+	# Defaults to every supported platform: Windows, macOS and Linux on x64 and arm64.
+	[String[]]$RuntimeIdentifier = @("win-x64", "win-arm64", "osx-x64", "osx-arm64", "linux-x64", "linux-arm64"),
 	[String]$OutputDirectory = "",
 	[Switch]$Clean
 )
@@ -28,33 +29,27 @@ else
 	$publishRoot = if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $root $OutputDirectory }
 }
 
-$output = Join-Path $publishRoot $RuntimeIdentifier
-$staging = Join-Path $output "_staging"
-$frameworkStaging = Join-Path $staging "framework-dependent"
-$selfContainedStaging = Join-Path $staging "self-contained"
-$frameworkOutput = Join-Path $output "without-dotnet"
-$selfContainedOutput = Join-Path $output "with-dotnet"
-# Windows publishes .exe files; Linux and macOS publish extensionless executable files.
-$executableExtension = if ($RuntimeIdentifier.StartsWith("win-", [StringComparison]::OrdinalIgnoreCase)) { ".exe" } else { "" }
-$executableBaseName = if ($RuntimeIdentifier.StartsWith("linux-", [StringComparison]::OrdinalIgnoreCase)) { "mveconverter" } else { "MveConverter" }
-$executableName = "$executableBaseName$executableExtension"
+# Accept both "-RuntimeIdentifier a,b" and "-RuntimeIdentifier 'a,b'"; ignore duplicates and blanks.
+$runtimeIdentifiers = @(
+	$RuntimeIdentifier |
+		ForEach-Object { $_ -split "[,;\s]+" } |
+		Where-Object { -not [String]::IsNullOrWhiteSpace($_) } |
+		Select-Object -Unique
+)
 
-if ($Clean -and (Test-Path -LiteralPath $output))
+$supportedPattern = "^(win|osx|linux)-(x64|arm64)$"
+foreach ($rid in $runtimeIdentifiers)
 {
-	Remove-Item -LiteralPath $output -Recurse -Force
-}
-
-New-Item -ItemType Directory -Force -Path $output | Out-Null
-New-Item -ItemType Directory -Force -Path $frameworkOutput | Out-Null
-New-Item -ItemType Directory -Force -Path $selfContainedOutput | Out-Null
-if (Test-Path -LiteralPath $staging)
-{
-	Remove-Item -LiteralPath $staging -Recurse -Force
+	if ($rid -notmatch $supportedPattern)
+	{
+		throw "Unsupported runtime identifier '$rid'. Supported: win|osx|linux with x64|arm64 (for example win-x64, osx-arm64, linux-arm64)."
+	}
 }
 
 function Publish-Executable
 {
 	param(
+		[String]$Runtime,
 		[Boolean]$SelfContained,
 		[String]$PublishDirectory
 	)
@@ -63,13 +58,13 @@ function Publish-Executable
 	$arguments = @(
 		"publish", $project,
 		"--configuration", $Configuration,
-		"--runtime", $RuntimeIdentifier,
+		"--runtime", $Runtime,
 		"--self-contained", $selfContainedValue,
 		"-p:PublishSingleFile=true",
 		"-p:IncludeNativeLibrariesForSelfExtract=true",
 		"-p:DebugType=None",
 		"-p:DebugSymbols=false",
-		"-p:PublishDir=$PublishDirectory\"
+		"-p:PublishDir=$PublishDirectory$([IO.Path]::DirectorySeparatorChar)"
 	)
 
 	if ($SelfContained)
@@ -77,44 +72,83 @@ function Publish-Executable
 		$arguments += "-p:EnableCompressionInSingleFile=true"
 	}
 
-	& dotnet @arguments
+	& dotnet @arguments | Out-Host
 
 	if ($LASTEXITCODE -ne 0)
 	{
-		throw "dotnet publish failed with exit code $LASTEXITCODE."
+		throw "dotnet publish failed for $Runtime with exit code $LASTEXITCODE."
 	}
 }
 
-Write-Host "Publishing framework-dependent single-file executable..."
-Publish-Executable -SelfContained $false -PublishDirectory $frameworkStaging
-
-Write-Host "Publishing self-contained single-file executable with .NET 10 runtime..."
-Publish-Executable -SelfContained $true -PublishDirectory $selfContainedStaging
-
-$frameworkExe = Join-Path $frameworkStaging "MveTools.Cli$executableExtension"
-$selfContainedExe = Join-Path $selfContainedStaging "MveTools.Cli$executableExtension"
-$frameworkTarget = Join-Path $frameworkOutput $executableName
-$selfContainedTarget = Join-Path $selfContainedOutput $executableName
-
-if (-not (Test-Path -LiteralPath $frameworkExe))
+function Publish-Runtime
 {
-	throw "Expected executable was not produced: $frameworkExe"
-}
+	param([String]$Runtime)
 
-if (-not (Test-Path -LiteralPath $selfContainedExe))
-{
-	throw "Expected executable was not produced: $selfContainedExe"
-}
+	$output = Join-Path $publishRoot $Runtime
+	$staging = Join-Path $output "_staging"
+	$frameworkStaging = Join-Path $staging "framework-dependent"
+	$selfContainedStaging = Join-Path $staging "self-contained"
+	$frameworkOutput = Join-Path $output "without-dotnet"
+	$selfContainedOutput = Join-Path $output "with-dotnet"
+	# Windows publishes .exe files; Linux and macOS publish extensionless executable files.
+	$executableExtension = if ($Runtime.StartsWith("win-", [StringComparison]::OrdinalIgnoreCase)) { ".exe" } else { "" }
+	$executableBaseName = if ($Runtime.StartsWith("linux-", [StringComparison]::OrdinalIgnoreCase)) { "mveconverter" } else { "MveConverter" }
+	$executableName = "$executableBaseName$executableExtension"
 
-Copy-Item -LiteralPath $frameworkExe -Destination $frameworkTarget -Force
-Copy-Item -LiteralPath $selfContainedExe -Destination $selfContainedTarget -Force
-Remove-Item -LiteralPath $staging -Recurse -Force
+	if ($Clean -and (Test-Path -LiteralPath $output))
+	{
+		Remove-Item -LiteralPath $output -Recurse -Force
+	}
 
-$results = @(
+	New-Item -ItemType Directory -Force -Path $output | Out-Null
+	New-Item -ItemType Directory -Force -Path $frameworkOutput | Out-Null
+	New-Item -ItemType Directory -Force -Path $selfContainedOutput | Out-Null
+	if (Test-Path -LiteralPath $staging)
+	{
+		Remove-Item -LiteralPath $staging -Recurse -Force
+	}
+
+	Write-Host "[$Runtime] Publishing framework-dependent single-file executable..."
+	Publish-Executable -Runtime $Runtime -SelfContained $false -PublishDirectory $frameworkStaging
+
+	Write-Host "[$Runtime] Publishing self-contained single-file executable with .NET 10 runtime..."
+	Publish-Executable -Runtime $Runtime -SelfContained $true -PublishDirectory $selfContainedStaging
+
+	$frameworkExe = Join-Path $frameworkStaging "MveTools.Cli$executableExtension"
+	$selfContainedExe = Join-Path $selfContainedStaging "MveTools.Cli$executableExtension"
+	$frameworkTarget = Join-Path $frameworkOutput $executableName
+	$selfContainedTarget = Join-Path $selfContainedOutput $executableName
+
+	if (-not (Test-Path -LiteralPath $frameworkExe))
+	{
+		throw "Expected executable was not produced: $frameworkExe"
+	}
+
+	if (-not (Test-Path -LiteralPath $selfContainedExe))
+	{
+		throw "Expected executable was not produced: $selfContainedExe"
+	}
+
+	Copy-Item -LiteralPath $frameworkExe -Destination $frameworkTarget -Force
+	Copy-Item -LiteralPath $selfContainedExe -Destination $selfContainedTarget -Force
+	Remove-Item -LiteralPath $staging -Recurse -Force
+
 	Get-Item -LiteralPath $frameworkTarget
 	Get-Item -LiteralPath $selfContainedTarget
-)
+}
+
+$results = @()
+foreach ($rid in $runtimeIdentifiers)
+{
+	$results += Publish-Runtime -Runtime $rid
+}
 
 Write-Host ""
 Write-Host "Publish complete:"
-$results | Select-Object Name, Length, FullName | Format-Table -AutoSize
+$results | Select-Object @{ Name = "Name"; Expression = { $_.Name } }, @{ Name = "Length"; Expression = { $_.Length } }, FullName | Format-Table -AutoSize
+
+if ($runtimeIdentifiers | Where-Object { -not $_.StartsWith("win-", [StringComparison]::OrdinalIgnoreCase) })
+{
+	Write-Host "Note: the Linux and macOS files are not marked executable when published from Windows."
+	Write-Host "      Run 'chmod +x' on them after copying (tar/zip them from a Unix shell to keep the mode)."
+}

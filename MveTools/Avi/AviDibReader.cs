@@ -8,6 +8,36 @@ namespace MveTools.Avi
 
 	public sealed class AviDibReader
 	{
+		private readonly record struct ChunkLocation(Int64 Offset, Int32 Size);
+
+		/// <summary>Stream properties gathered from the <c>hdrl</c> list.</summary>
+		private sealed class StreamInfo
+		{
+			public StreamInfo(RgbColor[]? customPalette)
+			{
+				HasCustomPalette = customPalette is not null;
+				Palette = customPalette ?? PaletteFile.CreateGrayscale();
+			}
+
+			public Boolean HasCustomPalette { get; }
+
+			public Int32 Width { get; set; }
+
+			public Int32 Height { get; set; }
+
+			public UInt16 BitCount { get; set; }
+
+			public RgbColor[] Palette { get; set; }
+
+			public Double FrameRate { get; set; } = 15;
+
+			public Int32 AudioSampleRate { get; set; }
+
+			public Int16 AudioChannels { get; set; }
+
+			public Int16 AudioBits { get; set; }
+		}
+
 		public IndexedVideo Read(String path, AviReadOptions? options = null)
 		{
 			options ??= new AviReadOptions();
@@ -25,16 +55,9 @@ namespace MveTools.Avi
 				throw new InvalidDataException("The file is not an AVI container.");
 			}
 
-			Int32 width = 0;
-			Int32 height = 0;
-			UInt16 bitCount = 0;
-			RgbColor[] palette = options.Palette ?? CreateDefaultPalette();
-			Double frameRate = 15;
-			List<(Int64 Offset, Int32 Size)> frameChunks = [];
-			List<(Int64 Offset, Int32 Size)> audioChunks = [];
-			Int32 audioSampleRate = 0;
-			Int16 audioChannels = 0;
-			Int16 audioBits = 0;
+			StreamInfo info = new(options.Palette);
+			List<ChunkLocation> frameChunks = [];
+			List<ChunkLocation> audioChunks = [];
 
 			while (stream.Position + 8 <= stream.Length)
 			{
@@ -47,7 +70,7 @@ namespace MveTools.Avi
 					String listType = ReadFourCc(reader);
 					if (listType == "hdrl")
 					{
-						ReadHeaderList(reader, dataOffset + size, options.Palette is not null, ref width, ref height, ref bitCount, ref palette, ref frameRate, ref audioSampleRate, ref audioChannels, ref audioBits);
+						ReadHeaderList(reader, dataOffset + size, info);
 					}
 					else if (listType == "movi")
 					{
@@ -58,14 +81,14 @@ namespace MveTools.Avi
 				stream.Position = AlignWord(dataOffset + size);
 			}
 
-			if (width <= 0 || height <= 0 || bitCount == 0)
+			if (info.Width <= 0 || info.Height <= 0 || info.BitCount == 0)
 			{
 				throw new InvalidDataException("The AVI stream header is incomplete.");
 			}
 
-			if (bitCount is not 8 and not 24 and not 32)
+			if (info.BitCount is not 8 and not 24 and not 32)
 			{
-				throw new NotSupportedException($"Only uncompressed 8, 24, and 32 bpp DIB AVI files are supported. Found {bitCount} bpp.");
+				throw new NotSupportedException($"Only uncompressed 8, 24, and 32 bpp DIB AVI files are supported. Found {info.BitCount} bpp.");
 			}
 
 			List<IndexedVideoFrame> frames = [];
@@ -73,27 +96,16 @@ namespace MveTools.Avi
 			{
 				stream.Position = offset;
 				Byte[] data = reader.ReadBytes(size);
-				frames.Add(bitCount == 8
-					? DecodeIndexedFrame(data, width, height)
-					: DecodeRgbFrame(data, width, height, bitCount, palette, options.UseFloydSteinbergDither));
+				frames.Add(info.BitCount == 8
+					? DecodeIndexedFrame(data, info.Width, info.Height)
+					: DecodeRgbFrame(data, info.Width, info.Height, info.BitCount, info.Palette, options.UseFloydSteinbergDither));
 			}
 
-			PcmAudioTrack? audio = ReadAudio(reader, audioChunks, audioSampleRate, audioChannels, audioBits);
-			return new IndexedVideo(width, height, frameRate, palette, frames, audio);
+			PcmAudioTrack? audio = ReadAudio(reader, audioChunks, info.AudioSampleRate, info.AudioChannels, info.AudioBits);
+			return new IndexedVideo(info.Width, info.Height, info.FrameRate, info.Palette, frames, audio);
 		}
 
-		private static void ReadHeaderList(
-			BinaryReader reader,
-			Int64 end,
-			Boolean hasCustomPalette,
-			ref Int32 width,
-			ref Int32 height,
-			ref UInt16 bitCount,
-			ref RgbColor[] palette,
-			ref Double frameRate,
-			ref Int32 audioSampleRate,
-			ref Int16 audioChannels,
-			ref Int16 audioBits)
+		private static void ReadHeaderList(BinaryReader reader, Int64 end, StreamInfo info)
 		{
 			while (reader.BaseStream.Position + 8 <= end)
 			{
@@ -106,7 +118,7 @@ namespace MveTools.Avi
 					String listType = ReadFourCc(reader);
 					if (listType == "strl")
 					{
-						ReadStreamList(reader, dataOffset + size, hasCustomPalette, ref width, ref height, ref bitCount, ref palette, ref frameRate, ref audioSampleRate, ref audioChannels, ref audioBits);
+						ReadStreamList(reader, dataOffset + size, info);
 					}
 				}
 
@@ -114,18 +126,7 @@ namespace MveTools.Avi
 			}
 		}
 
-		private static void ReadStreamList(
-			BinaryReader reader,
-			Int64 end,
-			Boolean hasCustomPalette,
-			ref Int32 width,
-			ref Int32 height,
-			ref UInt16 bitCount,
-			ref RgbColor[] palette,
-			ref Double frameRate,
-			ref Int32 audioSampleRate,
-			ref Int16 audioChannels,
-			ref Int16 audioBits)
+		private static void ReadStreamList(BinaryReader reader, Int64 end, StreamInfo info)
 		{
 			String? streamType = null;
 			while (reader.BaseStream.Position + 8 <= end)
@@ -145,55 +146,69 @@ namespace MveTools.Avi
 						UInt32 rate = reader.ReadUInt32();
 						if (scale != 0)
 						{
-							frameRate = rate / (Double)scale;
+							info.FrameRate = rate / (Double)scale;
 						}
 					}
 				}
 				else if (id == "strf" && streamType == "vids")
 				{
-					UInt32 headerSize = reader.ReadUInt32();
-					width = reader.ReadInt32();
-					height = Math.Abs(reader.ReadInt32());
-					_ = reader.ReadUInt16();
-					bitCount = reader.ReadUInt16();
-					reader.BaseStream.Position = dataOffset + headerSize;
-
-					if (bitCount == 8)
-					{
-						palette = new RgbColor[256];
-						for (Int32 i = 0; i < palette.Length && reader.BaseStream.Position + 4 <= dataOffset + size; i++)
-						{
-							Byte b = reader.ReadByte();
-							Byte g = reader.ReadByte();
-							Byte r = reader.ReadByte();
-							_ = reader.ReadByte();
-							if (!hasCustomPalette)
-							{
-								palette[i] = new RgbColor(r, g, b);
-							}
-						}
-					}
+					ReadVideoFormat(reader, dataOffset, size, info);
 				}
 				else if (id == "strf" && streamType == "auds")
 				{
-					UInt16 formatTag = reader.ReadUInt16();
-					if (formatTag != 1)
-					{
-						throw new NotSupportedException($"Only PCM AVI audio is supported. Found format tag 0x{formatTag:X4}.");
-					}
-
-					audioChannels = (Int16)reader.ReadUInt16();
-					audioSampleRate = (Int32)reader.ReadUInt32();
-					_ = reader.ReadUInt32();
-					_ = reader.ReadUInt16();
-					audioBits = (Int16)reader.ReadUInt16();
+					ReadAudioFormat(reader, info);
 				}
 
 				reader.BaseStream.Position = AlignWord(dataOffset + size);
 			}
 		}
 
-		private static void ReadMoviList(BinaryReader reader, Int64 end, List<(Int64 Offset, Int32 Size)> frameChunks, List<(Int64 Offset, Int32 Size)> audioChunks)
+		private static void ReadVideoFormat(BinaryReader reader, Int64 dataOffset, Int32 size, StreamInfo info)
+		{
+			UInt32 headerSize = reader.ReadUInt32();
+			info.Width = reader.ReadInt32();
+			info.Height = Math.Abs(reader.ReadInt32());
+			_ = reader.ReadUInt16();
+			info.BitCount = reader.ReadUInt16();
+			reader.BaseStream.Position = dataOffset + headerSize;
+
+			if (info.BitCount != 8)
+			{
+				return;
+			}
+
+			RgbColor[] palette = new RgbColor[256];
+			for (Int32 i = 0; i < palette.Length && reader.BaseStream.Position + 4 <= dataOffset + size; i++)
+			{
+				Byte b = reader.ReadByte();
+				Byte g = reader.ReadByte();
+				Byte r = reader.ReadByte();
+				_ = reader.ReadByte();
+				if (!info.HasCustomPalette)
+				{
+					palette[i] = new RgbColor(r, g, b);
+				}
+			}
+
+			info.Palette = palette;
+		}
+
+		private static void ReadAudioFormat(BinaryReader reader, StreamInfo info)
+		{
+			UInt16 formatTag = reader.ReadUInt16();
+			if (formatTag != 1)
+			{
+				throw new NotSupportedException($"Only PCM AVI audio is supported. Found format tag 0x{formatTag:X4}.");
+			}
+
+			info.AudioChannels = (Int16)reader.ReadUInt16();
+			info.AudioSampleRate = (Int32)reader.ReadUInt32();
+			_ = reader.ReadUInt32();
+			_ = reader.ReadUInt16();
+			info.AudioBits = (Int16)reader.ReadUInt16();
+		}
+
+		private static void ReadMoviList(BinaryReader reader, Int64 end, List<ChunkLocation> frameChunks, List<ChunkLocation> audioChunks)
 		{
 			while (reader.BaseStream.Position + 8 <= end)
 			{
@@ -202,18 +217,18 @@ namespace MveTools.Avi
 				Int64 dataOffset = reader.BaseStream.Position;
 				if (id.EndsWith("db", StringComparison.Ordinal) || id.EndsWith("dc", StringComparison.Ordinal))
 				{
-					frameChunks.Add((dataOffset, size));
+					frameChunks.Add(new ChunkLocation(dataOffset, size));
 				}
 				else if (id.EndsWith("wb", StringComparison.Ordinal))
 				{
-					audioChunks.Add((dataOffset, size));
+					audioChunks.Add(new ChunkLocation(dataOffset, size));
 				}
 
 				reader.BaseStream.Position = AlignWord(dataOffset + size);
 			}
 		}
 
-		private static PcmAudioTrack? ReadAudio(BinaryReader reader, List<(Int64 Offset, Int32 Size)> audioChunks, Int32 sampleRate, Int16 channels, Int16 bits)
+		private static PcmAudioTrack? ReadAudio(BinaryReader reader, List<ChunkLocation> audioChunks, Int32 sampleRate, Int16 channels, Int16 bits)
 		{
 			if (audioChunks.Count == 0 || sampleRate <= 0 || channels <= 0 || bits <= 0)
 			{
@@ -247,11 +262,12 @@ namespace MveTools.Avi
 		{
 			Int32 bytesPerPixel = bitCount / 8;
 			Int32 stride = Align4(width * bytesPerPixel);
-			Byte[] pixels = new Byte[width * height];
 			if (dither)
 			{
 				return DecodeRgbFrameWithDither(data, width, height, bitCount, palette);
 			}
+
+			Byte[] pixels = new Byte[width * height];
 
 			for (Int32 y = 0; y < height; y++)
 			{
@@ -347,18 +363,6 @@ namespace MveTools.Avi
 			}
 
 			return (Byte)bestIndex;
-		}
-
-		private static RgbColor[] CreateDefaultPalette()
-		{
-			RgbColor[] palette = new RgbColor[256];
-			for (Int32 i = 0; i < palette.Length; i++)
-			{
-				Byte value = (Byte)i;
-				palette[i] = new RgbColor(value, value, value);
-			}
-
-			return palette;
 		}
 
 		private static String ReadFourCc(BinaryReader reader)

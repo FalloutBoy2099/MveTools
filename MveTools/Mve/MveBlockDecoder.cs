@@ -26,51 +26,51 @@ namespace MveTools.Mve
 		{
 			switch (opcode)
 			{
-				case 0x0:
+				case MveBlockOpcodes.CopyPrevious:
 					CopyBlock(last, blockX, blockY, 0, 0);
 					break;
-				case 0x1:
+				case MveBlockOpcodes.CopySecondPrevious:
 					CopyBlock(secondLast, blockX, blockY, 0, 0);
 					break;
-				case 0x2:
+				case MveBlockOpcodes.MotionFromSecondPrevious:
 					DecodeMotionFromSecondLast(blockX, blockY, reverse: false);
 					break;
-				case 0x3:
+				case MveBlockOpcodes.MotionFromCurrent:
 					DecodeMotionFromCurrent(blockX, blockY);
 					break;
-				case 0x4:
+				case MveBlockOpcodes.SmallMotionFromPrevious:
 					DecodeSmallMotionFromLast(blockX, blockY);
 					break;
-				case 0x5:
+				case MveBlockOpcodes.MotionFromPrevious:
 					CopyBlock(last, blockX, blockY, ReadSByte(), ReadSByte());
 					break;
-				case 0x6:
+				case MveBlockOpcodes.Skip:
 					break;
-				case 0x7:
+				case MveBlockOpcodes.TwoColor:
 					DecodeTwoColor(blockX, blockY);
 					break;
-				case 0x8:
+				case MveBlockOpcodes.TwoColorSplit:
 					DecodeTwoColorSplit(blockX, blockY);
 					break;
-				case 0x9:
+				case MveBlockOpcodes.FourColor:
 					DecodeFourColor(blockX, blockY);
 					break;
-				case 0xA:
+				case MveBlockOpcodes.FourColorSplit:
 					DecodeFourColorSplit(blockX, blockY);
 					break;
-				case 0xB:
+				case MveBlockOpcodes.Raw:
 					DecodeRaw(blockX, blockY);
 					break;
-				case 0xC:
+				case MveBlockOpcodes.SixteenColor:
 					DecodeSixteenColor(blockX, blockY);
 					break;
-				case 0xD:
+				case MveBlockOpcodes.FourColorQuadrants:
 					DecodeFourColorBlocks(blockX, blockY);
 					break;
-				case 0xE:
+				case MveBlockOpcodes.Solid:
 					FillBlock(blockX, blockY, reader.ReadByte());
 					break;
-				case 0xF:
+				case MveBlockOpcodes.Dither:
 					DecodeDither(blockX, blockY);
 					break;
 				default:

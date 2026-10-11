@@ -53,6 +53,22 @@ namespace Sample
 }
 ```
 
+## Publishing
+
+`Publish.ps1` produces single-file executables of the CLI for Windows, macOS and Linux on x64 and arm64 (12 files: each platform with and without the bundled .NET runtime) under `publish\<runtime>\with-dotnet` and `publish\<runtime>\without-dotnet`.
+
+```powershell
+.\Publish.ps1                                   # all six platforms
+.\Publish.ps1 -RuntimeIdentifier win-x64        # a single platform
+.\Publish.ps1 -RuntimeIdentifier osx-arm64,linux-arm64 -Clean
+```
+
+Supported runtime identifiers are `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, and `linux-arm64`. Files published from Windows for Linux or macOS are not marked executable; run `chmod +x` after copying them.
+
+## Tests
+
+`dotnet test` runs the unit tests. `CharacterizationTests` compare the exact output of the MVE/AVI/WAV writers and the converter pipeline with the values recorded in `MveTools.Tests\golden.txt`; after an intentional format change, re-record them by setting the `MVETOOLS_UPDATE_GOLDEN` environment variable for one test run.
+
 ## Notes
 
 The `MveTools` library project has no external executable dependency. The CLI uses `Spectre.Console` from NuGet for the interactive menu.

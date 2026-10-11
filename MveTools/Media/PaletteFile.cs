@@ -2,9 +2,22 @@ namespace MveTools.Media
 {
 	using System;
 	using System.IO;
+	using IO;
 
 	public static class PaletteFile
 	{
+		internal static RgbColor[] CreateGrayscale()
+		{
+			RgbColor[] palette = new RgbColor[256];
+			for (Int32 i = 0; i < palette.Length; i++)
+			{
+				Byte value = (Byte)i;
+				palette[i] = new RgbColor(value, value, value);
+			}
+
+			return palette;
+		}
+
 		public static RgbColor[] Read(String path)
 		{
 			Byte[] data = File.ReadAllBytes(path);
@@ -33,11 +46,7 @@ namespace MveTools.Media
 				throw new ArgumentException("ACT palettes require 256 colors.", nameof(palette));
 			}
 
-			String? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-			if (!String.IsNullOrWhiteSpace(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
+			FileSystemHelper.EnsureParentDirectory(path);
 
 			Byte[] data = new Byte[768];
 			for (Int32 i = 0; i < palette.Length; i++)

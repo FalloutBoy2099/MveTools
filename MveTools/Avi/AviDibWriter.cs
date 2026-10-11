@@ -20,11 +20,7 @@ namespace MveTools.Avi
 
 		private static void Write(String path, IndexedVideo video, AviPixelFormat pixelFormat)
 		{
-			String? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-			if (!String.IsNullOrWhiteSpace(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
+			FileSystemHelper.EnsureParentDirectory(path);
 
 			using FileStream stream = File.Create(path);
 			using BinaryWriter writer = new(stream);

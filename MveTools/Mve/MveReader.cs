@@ -4,6 +4,7 @@ namespace MveTools.Mve
 	using System.Collections.Generic;
 	using System.IO;
 	using IO;
+	using Inspection;
 	using Media;
 
 	public sealed class MveReader
@@ -14,8 +15,7 @@ namespace MveTools.Mve
 			using BinaryReader reader = new(stream);
 
 			Byte[] headerBytes = reader.ReadBytes(20);
-			Byte[] expectedHeader = System.Text.Encoding.ASCII.GetBytes("Interplay MVE File\x1A\0");
-			if (!headerBytes.SequenceEqual(expectedHeader))
+			if (!headerBytes.SequenceEqual(MveFormat.CreateHeaderBytes()))
 			{
 				throw new InvalidDataException("The file does not start with an Interplay MVE header.");
 			}
@@ -24,7 +24,7 @@ namespace MveTools.Mve
 
 			Int32 width = 0;
 			Int32 height = 0;
-			RgbColor[] palette = CreateDefaultPalette();
+			RgbColor[] palette = PaletteFile.CreateGrayscale();
 			List<IndexedVideoFrame> frames = [];
 			using MemoryStream audioSamples = new();
 			Byte[]? decodingMap = null;
@@ -77,7 +77,7 @@ namespace MveTools.Mve
 							decodingMap = payload;
 							break;
 						case MveOpcodes.VideoData06:
-							if (chunkType == 0x0003)
+							if (chunkType == (UInt16)MveChunkType.Video)
 							{
 								IndexedVideoFrame frame = DecodeRawFrame(width, height, decodingMap, payload);
 								frames.Add(frame);
@@ -86,7 +86,7 @@ namespace MveTools.Mve
 							}
 							break;
 						case MveOpcodes.VideoData11:
-							if (chunkType == 0x0003)
+							if (chunkType == (UInt16)MveChunkType.Video)
 							{
 								IndexedVideoFrame frame = DecodeFormat11Frame(width, height, decodingMap, payload, lastFrame, secondLastFrame);
 								frames.Add(frame);
@@ -271,7 +271,7 @@ namespace MveTools.Mve
 
 		private static RgbColor[] ReadPalette(Byte[] payload)
 		{
-			RgbColor[] palette = CreateDefaultPalette();
+			RgbColor[] palette = PaletteFile.CreateGrayscale();
 			if (payload.Length < 4)
 			{
 				return palette;
@@ -296,18 +296,6 @@ namespace MveTools.Mve
 			Int32 scaled = value << 2;
 			scaled |= scaled >> 6 & 0x03;
 			return (Byte)scaled;
-		}
-
-		private static RgbColor[] CreateDefaultPalette()
-		{
-			RgbColor[] palette = new RgbColor[256];
-			for (Int32 i = 0; i < palette.Length; i++)
-			{
-				Byte value = (Byte)i;
-				palette[i] = new RgbColor(value, value, value);
-			}
-
-			return palette;
 		}
 	}
 }
