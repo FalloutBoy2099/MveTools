@@ -69,6 +69,8 @@ namespace MveTools.Cli.Localization.Languages
 			["UsageToVideo"] = "  mveconverter to-video <entrée.mve> <sortie> [--format avi8|avi24|wav|mp4]",
 			["UsageToMve"] = "  mveconverter to-mve <entrée.avi|mp4|m4v|mov> <sortie.mve> [options]",
 			["FormatUnknown"] = "Format de sortie inconnu: {0}. Utilise avi8, avi24, wav ou mp4.",
+			["RateSizeExclusive"] = "--rate et --size sont mutuellement exclusifs.",
+			["EndLenExclusive"] = "--end et --len sont mutuellement exclusifs.",
 			["FormatTitle"] = "Format de sortie",
 			["AutoFormat"] = "Automatique: {0}",
 			["FormatMp4"] = "MP4/H.264 (ffmpeg système)",

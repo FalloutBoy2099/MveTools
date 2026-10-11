@@ -32,12 +32,12 @@ namespace MveTools.Cli.Commands
 		{
 			if (CliArguments.HasFlag(args, "--rate") && CliArguments.HasFlag(args, "--size"))
 			{
-				throw new ArgumentException("--rate and --size are mutually exclusive.");
+				throw new ArgumentException(AppText.Get("RateSizeExclusive"));
 			}
 
 			if (CliArguments.HasFlag(args, "--end") && CliArguments.HasFlag(args, "--len"))
 			{
-				throw new ArgumentException("--end and --len are mutually exclusive.");
+				throw new ArgumentException(AppText.Get("EndLenExclusive"));
 			}
 
 			return new VideoToMveOptions
