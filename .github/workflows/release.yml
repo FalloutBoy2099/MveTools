@@ -164,7 +164,7 @@ jobs:
       - name: Attest the build provenance
         # Not available for private repositories on some plans: the release goes on without it.
         continue-on-error: true
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release/*
 
