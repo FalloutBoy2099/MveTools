@@ -1,0 +1,63 @@
+name: Build binaries
+
+# Reusable workflow: publishes the CLI for every platform in both flavors and uploads the archives as workflow artifacts.
+#   <rid>.zip / <rid>.tar.gz                  executable only, needs .NET 10 installed
+#   <rid>-self-contained.zip / .tar.gz        executable with the .NET runtime inside (no installation needed)
+# The tar.gz archives (macOS, Linux) keep the executable bit.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version of the build, for example 1.2.3 or 1.2.3-beta.1
+        required: true
+        type: string
+      retention-days:
+        description: How long the artifacts are kept
+        required: false
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: ${{ matrix.rid }} (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [win-x64, win-arm64, osx-x64, osx-arm64, linux-x64, linux-arm64]
+        mode: [framework-dependent, self-contained]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish and pack
+        run: bash .github/scripts/package.sh "${{ matrix.rid }}" "${{ matrix.mode }}" "${{ inputs.version }}" dist
+
+      - name: Smoke test
+        if: matrix.rid == 'linux-x64'
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [[ "${{ matrix.mode }}" == "self-contained" ]]; then suffix="-self-contained"; fi
+          mkdir smoke
+          tar -xzf "dist/linux-x64${suffix}.tar.gz" -C smoke
+          ./smoke/mveconverter --help
+          ./smoke/mveconverter inspect --help
+
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.rid }}-${{ matrix.mode }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}

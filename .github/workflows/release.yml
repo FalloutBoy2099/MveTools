@@ -1,0 +1,221 @@
+name: Release
+
+# Publishes a GitHub release with, for every platform (Windows, macOS, Linux on x64 and arm64):
+#   <rid>.zip and .tar.gz                 executable only (needs .NET 10 installed)
+#   <rid>-self-contained.zip and .tar.gz  executable with the .NET runtime inside
+# plus SHA256SUMS.txt, signed build provenance attestations and the MveTools library as a NuGet package
+# (attached to the release and pushed to GitHub Packages; also pushed to nuget.org when the NUGET_API_KEY secret exists).
+#
+# To release: git tag v1.2.3 && git push origin v1.2.3
+# A tag with a suffix (v1.2.3-beta.1) is published as a pre-release. The workflow can also be started by hand.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading v (for example 1.2.3 or 1.2.3-beta.1)
+        required: true
+        type: string
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
+      draft:
+        description: Create the release as a draft
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      tag: ${{ steps.info.outputs.tag }}
+      prerelease: ${{ steps.info.outputs.prerelease }}
+    steps:
+      - name: Work out the version
+        id: info
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            version="${INPUT_VERSION#v}"
+          else
+            version="${REF_NAME#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$version' is not a version such as 1.2.3 or 1.2.3-beta.1"
+            exit 1
+          fi
+          prerelease=false
+          if [[ "$version" == *-* || "$INPUT_PRERELEASE" == "true" ]]; then
+            prerelease=true
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Binaries
+    needs: prepare
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      retention-days: 30
+
+  package:
+    name: NuGet package
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pack the library
+        run: >
+          dotnet pack MveTools/MveTools.csproj
+          --configuration Release
+          --output nupkg
+          -p:Version=${{ needs.prepare.outputs.version }}
+          -p:PackageId=MveTools
+          -p:Authors=${{ github.repository_owner }}
+          "-p:Description=Library for Fallout/Interplay MVE conversion: MVE to AVI, WAV and MP4, and video to MVE."
+          -p:RepositoryUrl=${{ github.server_url }}/${{ github.repository }}
+          -p:PackageProjectUrl=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: nupkg/*.nupkg
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the release
+    needs: [prepare, binaries, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      DRAFT: ${{ inputs.draft }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: release
+          merge-multiple: true
+
+      - name: Download the NuGet package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: release
+
+      - name: Write the checksums
+        working-directory: release
+        run: |
+          set -euo pipefail
+          sha256sum -- *.zip *.tar.gz *.nupkg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest the build provenance
+        # Not available for private repositories on some plans: the release goes on without it.
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/*
+
+      - name: Create or update the GitHub release
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'EOF'
+          ## Downloads
+
+          | Platform | Executable only (needs .NET 10) | With the .NET runtime inside |
+          | --- | --- | --- |
+          | Windows x64 | `win-x64.zip` | `win-x64-self-contained.zip` |
+          | Windows arm64 | `win-arm64.zip` | `win-arm64-self-contained.zip` |
+          | macOS x64 (Intel) | `osx-x64.tar.gz` | `osx-x64-self-contained.tar.gz` |
+          | macOS arm64 (Apple silicon) | `osx-arm64.tar.gz` | `osx-arm64-self-contained.tar.gz` |
+          | Linux x64 | `linux-x64.tar.gz` | `linux-x64-self-contained.tar.gz` |
+          | Linux arm64 | `linux-arm64.tar.gz` | `linux-arm64-self-contained.tar.gz` |
+
+          Every platform also has a `.zip` of the same content. Use the `.tar.gz` on macOS and Linux: it keeps the executable permission
+          (with a `.zip`, run `chmod +x` once). Verify a download with `SHA256SUMS.txt`, or with
+          `gh attestation verify <file> --repo ${{ github.repository }}`.
+
+          The `MveTools` library is attached as a NuGet package.
+
+          ## Changes
+          EOF
+          flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
+          if [[ "$DRAFT" == "true" ]]; then flags+=(--draft); fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --title "MveTools $VERSION" \
+              --target "$GITHUB_SHA" \
+              --notes-file notes.md \
+              --generate-notes \
+              "${flags[@]}"
+          fi
+
+      - name: Push the package to GitHub Packages
+        run: >
+          dotnet nuget push "release/*.nupkg"
+          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          --api-key "${{ github.token }}"
+          --skip-duplicate
+
+      - name: Push the package to nuget.org
+        if: env.NUGET_API_KEY != '' && needs.prepare.outputs.prerelease == 'false'
+        run: >
+          dotnet nuget push "release/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key "$NUGET_API_KEY"
+          --skip-duplicate

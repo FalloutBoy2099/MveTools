@@ -67,6 +67,18 @@ namespace Sample
 
 Supported runtime identifiers are `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, and `linux-arm64`. Files published from Windows for Linux or macOS are not marked executable; run `chmod +x` after copying them.
 
+## Continuous integration and releases
+
+GitHub Actions workflows live in `.github/workflows`:
+
+- `ci.yml` builds the solution on Windows, Linux and macOS for every push and pull request, runs the tests when the solution has a test project, and runs the CLI. Pushes to `main` also build the binaries of every platform as downloadable workflow artifacts (kept 7 days).
+- `build-binaries.yml` is the reusable workflow that publishes the CLI for Windows, macOS and Linux on x64 and arm64, in two flavors: the executable alone (needs .NET 10 installed) and the executable with the .NET runtime inside (`-self-contained`). Each one is packed as `.zip`, and as `.tar.gz` on macOS and Linux (which keeps the executable permission). The packing script, `.github/scripts/package.sh`, can be run by hand on Linux or macOS.
+- `release.yml` publishes a GitHub release when a version tag is pushed: `git tag v1.2.3 && git push origin v1.2.3`. A tag with a suffix such as `v1.2.3-beta.1` is a pre-release. It attaches the 24 archives, `SHA256SUMS.txt`, signed build provenance attestations (check a download with `gh attestation verify <file> --repo <owner>/<repo>`) and the `MveTools` library as a NuGet package, which is also pushed to GitHub Packages (and to nuget.org for non-pre-releases when the `NUGET_API_KEY` secret is set). It can also be started by hand from the Actions tab, with options to mark the release as a pre-release or a draft.
+- `nightly.yml` replaces the `nightly` pre-release with fresh binaries every night when `main` has changed (or on demand).
+- `dependabot.yml` proposes weekly updates of the NuGet packages and of the actions.
+
+Before the first release, check in the repository settings that workflows have read and write permissions (Settings, Actions, General, Workflow permissions).
+
 ## Notes
 
 The `MveTools` library project has no external executable dependency. The CLI uses `Spectre.Console` from NuGet for the interactive menu.
