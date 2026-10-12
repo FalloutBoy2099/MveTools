@@ -3,23 +3,66 @@ namespace MveTools.Mve
 	using System;
 	using System.Collections.Generic;
 	using System.IO;
+	using System.Threading;
+	using Errors;
 	using IO;
 	using Inspection;
 	using Media;
 
 	public sealed class MveWriter
 	{
-		public void Write(String path, IndexedVideo video)
-		{
-			if (video.Width % 8 != 0 || video.Height % 8 != 0)
-			{
-				throw new NotSupportedException("MVE raw profile requires dimensions divisible by 8.");
-			}
+		/// <summary>Largest payload of one MVE chunk or opcode.</summary>
+		private const Int32 MaxPayload = UInt16.MaxValue;
 
+		/// <summary>Writes the video to <paramref name="path"/>; the partial file is deleted if the writing fails or is cancelled.</summary>
+		public MveWriteReport Write(String path, IndexedVideo video, MveEncoderOptions? options = null, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
+		{
+			EnsureSupported(video);
 			FileSystemHelper.EnsureParentDirectory(path);
 
-			using FileStream stream = File.Create(path);
-			using BinaryWriter writer = new(stream);
+			Boolean completed = false;
+			try
+			{
+				MveWriteReport report;
+				using (FileStream stream = File.Create(path))
+				{
+					report = Write(stream, video, options, cancellationToken, progress);
+				}
+
+				completed = true;
+				return report;
+			}
+			finally
+			{
+				if (!completed && File.Exists(path))
+				{
+					try
+					{
+						File.Delete(path);
+					}
+					catch (IOException)
+					{
+					}
+					catch (UnauthorizedAccessException)
+					{
+					}
+				}
+			}
+		}
+
+		/// <summary>Encodes the video without keeping the result, to know how large the file would be.</summary>
+		public MveWriteReport Measure(IndexedVideo video, MveEncoderOptions? options = null, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
+		{
+			EnsureSupported(video);
+			return Write(new CountingStream(), video, options, cancellationToken, progress);
+		}
+
+		public MveWriteReport Write(Stream stream, IndexedVideo video, MveEncoderOptions? options = null, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
+		{
+			EnsureSupported(video);
+			options ??= new MveEncoderOptions();
+
+			using BinaryWriter writer = new(stream, System.Text.Encoding.UTF8, leaveOpen: true);
 			writer.Write(MveFormat.CreateHeaderBytes());
 			writer.Write(MveFormat.MagicWords);
 
@@ -29,20 +72,34 @@ namespace MveTools.Mve
 			{
 				WriteInitAudioChunk(writer, audio);
 			}
+
+			MveFrameEncoder encoder = new(video.Palette, options.AllowMotion);
+			MveEncodeLevel[] levels = CreateLevels(options);
 			Byte[]? previousFrame = null;
 			Byte[]? secondPreviousFrame = null;
 			Int32 audioOffset = 0;
-			for (Int32 frameIndex = 0; frameIndex < video.Frames.Count; frameIndex++)
+			Int32 reducedFrames = 0;
+			Int32 fewestColors = 0;
+			Int32 frameCount = video.Frames.Count;
+			for (Int32 frameIndex = 0; frameIndex < frameCount; frameIndex++)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				if (audio is not null)
 				{
 					audioOffset = WriteAudioForFrame(writer, audio, video.FrameRate, frameIndex, audioOffset);
 				}
 
 				IndexedVideoFrame frame = video.Frames[frameIndex];
-				WriteVideoChunk(writer, frame, previousFrame, secondPreviousFrame);
+				MveEncodeLevel used = WriteVideoChunk(writer, encoder, frame, previousFrame, secondPreviousFrame, levels, out Byte[] reconstruction);
+				if (used.MaxColors != 0)
+				{
+					reducedFrames++;
+					fewestColors = fewestColors == 0 ? used.MaxColors : Math.Min(fewestColors, used.MaxColors);
+				}
+
 				secondPreviousFrame = previousFrame;
-				previousFrame = frame.Pixels;
+				previousFrame = reconstruction;
+				progress?.Report((frameIndex + 1) / (Double)frameCount);
 			}
 
 			while (audio is not null && audioOffset < audio.Samples.Length)
@@ -54,6 +111,25 @@ namespace MveTools.Mve
 
 			WriteSimpleChunk(writer, MveChunkType.Shutdown, []);
 			WriteSimpleChunk(writer, MveChunkType.End, CreateOpcode(MveOpcodes.EndOfStream, 0, []));
+			writer.Flush();
+			return new MveWriteReport(stream is CountingStream counting ? counting.Length : stream.CanSeek ? stream.Length : 0, reducedFrames, fewestColors);
+		}
+
+		private static void EnsureSupported(IndexedVideo video)
+		{
+			if (video.Width % 8 != 0 || video.Height % 8 != 0)
+			{
+				throw new NotSupportedException("MVE raw profile requires dimensions divisible by 8.").Tag(MveErrorCode.DimensionsNotMultipleOf8);
+			}
+		}
+
+		/// <summary>The exact encoding first, then — only for a frame that does not fit — blocks reduced to 4, 2 and 1 colors.</summary>
+		private static MveEncodeLevel[] CreateLevels(MveEncoderOptions options)
+		{
+			Int32 tolerance = Math.Max(0, options.Tolerance);
+			return options.AllowColorReduction
+				? [new(tolerance, 0), new(tolerance, 4), new(tolerance, 2), new(tolerance, 1)]
+				: [new(tolerance, 0)];
 		}
 
 		private static void WriteInitVideoChunk(BinaryWriter writer, IndexedVideo video)
@@ -112,6 +188,14 @@ namespace MveTools.Mve
 				return;
 			}
 
+			if (framePayload.Length + 16 > MaxPayload && size > audio.BlockAlign)
+			{
+				Int32 firstHalf = size / 2 / audio.BlockAlign * audio.BlockAlign;
+				WriteCompressedAudioChunk(writer, audio, offset, firstHalf);
+				WriteCompressedAudioChunk(writer, audio, offset + firstHalf, size - firstHalf);
+				return;
+			}
+
 			using MemoryStream payload = new();
 			using BinaryWriter payloadWriter = new(payload);
 			payloadWriter.Write(CreateOpcode(MveOpcodes.AudioFrame, 0, framePayload));
@@ -120,9 +204,37 @@ namespace MveTools.Mve
 			WriteSimpleChunk(writer, MveChunkType.AudioOnly, payload.ToArray());
 		}
 
-		private static void WriteVideoChunk(BinaryWriter writer, IndexedVideoFrame frame, Byte[]? previousFrame, Byte[]? secondPreviousFrame)
+		private static MveEncodeLevel WriteVideoChunk(
+			BinaryWriter writer,
+			MveFrameEncoder encoder,
+			IndexedVideoFrame frame,
+			Byte[]? previousFrame,
+			Byte[]? secondPreviousFrame,
+			MveEncodeLevel[] levels,
+			out Byte[] reconstruction)
 		{
-			MveFrameEncoder.Encode(frame, previousFrame, secondPreviousFrame, out Byte[] decodeMap, out Byte[] videoPayload);
+			Byte[] decodeMap = [];
+			Byte[] videoPayload = [];
+			MveEncodeLevel used = levels[0];
+			reconstruction = [];
+			Boolean fits = false;
+			foreach (MveEncodeLevel level in levels)
+			{
+				encoder.Encode(frame, previousFrame, secondPreviousFrame, level, out decodeMap, out videoPayload, out reconstruction);
+				used = level;
+
+				// The chunk holds the decoding map, the video data, the "send buffer" and the "end of chunk" opcodes (4 bytes of preamble each).
+				if (decodeMap.Length <= MaxPayload && videoPayload.Length <= MaxPayload && 16 + decodeMap.Length + videoPayload.Length <= MaxPayload)
+				{
+					fits = true;
+					break;
+				}
+			}
+
+			if (!fits)
+			{
+				throw new MveFrameTooLargeException(videoPayload.Length);
+			}
 
 			using MemoryStream payload = new();
 			using BinaryWriter payloadWriter = new(payload);
@@ -132,6 +244,7 @@ namespace MveTools.Mve
 			payloadWriter.Write(CreateOpcode(MveOpcodes.EndOfChunk, 0, []));
 
 			WriteSimpleChunk(writer, MveChunkType.Video, payload.ToArray());
+			return used;
 		}
 
 		private static Byte[] CreateInitVideoModePayload(Int32 width, Int32 height)
@@ -201,7 +314,7 @@ namespace MveTools.Mve
 		{
 			if (payload.Length > UInt16.MaxValue)
 			{
-				throw new NotSupportedException($"MVE opcode 0x{type:X2} payload is too large ({payload.Length} bytes).");
+				throw new NotSupportedException($"MVE opcode 0x{type:X2} payload is too large ({payload.Length} bytes).").Tag(MveErrorCode.OpcodePayloadTooLarge, type, payload.Length);
 			}
 
 			using MemoryStream stream = new();
@@ -217,7 +330,7 @@ namespace MveTools.Mve
 		{
 			if (payload.Length > UInt16.MaxValue)
 			{
-				throw new NotSupportedException($"MVE chunk 0x{(UInt16)type:X4} payload is too large ({payload.Length} bytes).");
+				throw new NotSupportedException($"MVE chunk 0x{(UInt16)type:X4} payload is too large ({payload.Length} bytes).").Tag(MveErrorCode.ChunkPayloadTooLarge, (UInt16)type, payload.Length);
 			}
 
 			writer.WriteUInt16LittleEndian((UInt16)payload.Length);

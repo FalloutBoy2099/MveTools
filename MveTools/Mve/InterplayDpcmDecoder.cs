@@ -2,6 +2,7 @@ namespace MveTools.Mve
 {
 	using System;
 	using System.IO;
+	using Errors;
 
 	internal static class InterplayDpcmDecoder
 	{
@@ -45,7 +46,7 @@ namespace MveTools.Mve
 		{
 			if (payload.Length < 6 + channels * 2)
 			{
-				throw new InvalidDataException("Compressed Interplay audio payload is truncated.");
+				throw new InvalidDataException("Compressed Interplay audio payload is truncated.").Tag(MveErrorCode.DpcmPayloadTruncated);
 			}
 
 			Int32 sampleCount = payload.Length - 6 - channels;

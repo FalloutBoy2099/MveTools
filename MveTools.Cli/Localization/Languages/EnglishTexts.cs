@@ -24,7 +24,7 @@ namespace MveTools.Cli.Localization.Languages
 			["ToVideoStatus"] = "Converting MVE to video...",
 			["ToMveStatus"] = "Converting video to MVE...",
 			["VideoToMveHeader"] = "Video to MVE",
-			["VideoToMveIntro"] = "Integrated MVE encoder\nAvailable options: AVI/MP4 source, test mode, palette, external audio, frame range, dithering, compression profile, bitrate/size hints.",
+			["VideoToMveIntro"] = "Integrated MVE encoder\nAvailable options: AVI/MP4 source, test mode, palette, external audio, frame range, dithering, compression profile, bitrate/size targets.",
 			["AudioTitle"] = "Audio",
 			["AudioKeep"] = "Keep video audio",
 			["AudioNone"] = "No audio (-ns)",
@@ -118,9 +118,9 @@ namespace MveTools.Cli.Localization.Languages
 			["HelpToMveAudioRateOption"] = "  --audio-rate <Hz>            Output audio sample rate. Default: 22050.",
 			["HelpToMvePaletteOptions"] = "  --palette|-p <act|pal>       Load a palette. --save-palette <act> writes the palette used.",
 			["HelpToMveFrameOptions"] = "  --start <n>                  First frame. --end <n> final frame. --len <n> frame count.",
-			["HelpToMveCompressionOptions"] = "  --old | --hq                 Select the legacy or high-quality compression profile.",
-			["HelpToMveLimitOptions"] = "  --rate <KiB/s> | --size <MiB> Add an indicative output bitrate or size target.",
-			["HelpToMveVideoOptions"] = "  --width <px> --height <px> --fps <value> Override auto-detected video properties. --dither enables Floyd-Steinberg.",
+			["HelpToMveCompressionOptions"] = "  --old | --hq                 --old skips the motion search (faster, larger file). --hq limits how much the picture may change to reach --rate/--size.",
+			["HelpToMveLimitOptions"] = "  --rate <KiB/s> | --size <MiB> Reach a bit rate or file size by tolerating small pixel differences between frames.",
+			["HelpToMveVideoOptions"] = "  --width <px> --height <px> --fps <value> Rescale the video or change its frame rate. --dither enables Floyd-Steinberg.",
 			["HelpAutoFormat"] = "  to-video auto-detects the output format from the extension when --format is omitted.",
 			["HelpFfmpeg"] = "  MP4/H.264 requires ffmpeg in PATH: Windows winget install Gyan.FFmpeg; Debian/Ubuntu sudo apt install ffmpeg; macOS brew install ffmpeg.",
 			["HelpDetect"] = "  Width, height, and fps are auto-detected when omitted. MP4/M4V/MOV input needs ffmpeg in PATH.",
@@ -128,7 +128,18 @@ namespace MveTools.Cli.Localization.Languages
 			["HelpExampleToVideo"] = "  mveconverter to-video intro.mve intro.avi",
 			["HelpExampleToVideoMp4"] = "  mveconverter to-video intro.mve intro.mp4 --format mp4",
 			["HelpExampleToMve"] = "  mveconverter to-mve intro.mp4 intro.mve",
-			["HelpExampleToMveAdvanced"] = "  mveconverter to-mve intro.avi intro.mve --start 10 --len 120 --dither --hq"
+			["HelpExampleToMveAdvanced"] = "  mveconverter to-mve intro.avi intro.mve --start 10 --len 120 --dither --hq",
+			["OptionUnknown"] = "Unknown option: {0}",
+			["OptionNeedsValue"] = "Option {0} needs a value.",
+			["OptionRepeated"] = "Option {0} is given more than once.",
+			["OptionInvalidValue"] = "Invalid value for option {0}: {1}",
+			["UnexpectedArgument"] = "Unexpected argument: {0}",
+			["OldHqExclusive"] = "--old and --hq are mutually exclusive.",
+			["Cancelled"] = "Cancelled.",
+			["StageReadingMve"] = "Reading the MVE...",
+			["StageWritingVideo"] = "Writing the video...",
+			["StageMeasuringSize"] = "Measuring the size...",
+			["StageEncodingMve"] = "Encoding the MVE..."
 		};
 	}
 }

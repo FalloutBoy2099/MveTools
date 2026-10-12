@@ -74,23 +74,31 @@ namespace MveTools.Cli
 						.AddChoices(MainMenuAction.Inspect, MainMenuAction.ToVideo, MainMenuAction.ToMve, MainMenuAction.Language, MainMenuAction.Quit));
 
 				AnsiConsole.WriteLine();
-				switch (action)
+				try
 				{
-					case MainMenuAction.Inspect:
-						RunInteractiveInspect();
-						break;
-					case MainMenuAction.ToVideo:
-						await RunInteractiveToVideoAsync().ConfigureAwait(false);
-						break;
-					case MainMenuAction.ToMve:
-						await RunInteractiveToMveAsync().ConfigureAwait(false);
-						break;
-					case MainMenuAction.Language:
-						RunInteractiveLanguage();
-						break;
-					default:
-						keepRunning = false;
-						break;
+					switch (action)
+					{
+						case MainMenuAction.Inspect:
+							RunInteractiveInspect();
+							break;
+						case MainMenuAction.ToVideo:
+							await RunInteractiveToVideoAsync().ConfigureAwait(false);
+							break;
+						case MainMenuAction.ToMve:
+							await RunInteractiveToMveAsync().ConfigureAwait(false);
+							break;
+						case MainMenuAction.Language:
+							RunInteractiveLanguage();
+							break;
+						default:
+							keepRunning = false;
+							break;
+					}
+				}
+				catch (Exception ex)
+				{
+					// A failed or cancelled action goes back to the menu instead of ending the session.
+					ConsoleOutput.WriteError(AppText.DescribeError(ex));
 				}
 
 				if (keepRunning)
@@ -126,9 +134,9 @@ namespace MveTools.Cli
 				Overwrite = PromptBoolean(AppText.Get("OverwriteConfirm"), true)
 			};
 
-			ConversionResult result = await RunWithStatusAsync(
+			ConversionResult result = await ConversionRunner.RunAsync(
 				AppText.Get("ToVideoStatus"),
-				() => new MveConverter().ConvertMveToVideoAsync(inputPath, outputPath, options)).ConfigureAwait(false);
+				(progress, cancellationToken) => new MveConverter().ConvertMveToVideoAsync(inputPath, outputPath, options, cancellationToken, progress)).ConfigureAwait(false);
 			ConsoleOutput.WriteConversionResult(result);
 		}
 
@@ -235,9 +243,9 @@ namespace MveTools.Cli
 				Overwrite = overwrite
 			};
 
-			ConversionResult result = await RunWithStatusAsync(
+			ConversionResult result = await ConversionRunner.RunAsync(
 				AppText.Get("ToMveStatus"),
-				() => new MveConverter().ConvertVideoToMveAsync(inputPath, outputPath, options)).ConfigureAwait(false);
+				(progress, cancellationToken) => new MveConverter().ConvertVideoToMveAsync(inputPath, outputPath, options, cancellationToken, progress)).ConfigureAwait(false);
 			ConsoleOutput.WriteConversionResult(result);
 		}
 
@@ -251,14 +259,6 @@ namespace MveTools.Cli
 					.AddChoices(AppText.Languages));
 			AppText.SetLanguage(language.Language);
 			AnsiConsole.MarkupLine($"[green]{Markup.Escape(AppText.Format("LanguageChanged", language.DisplayName))}[/]");
-		}
-
-		private static Task<ConversionResult> RunWithStatusAsync(String label, Func<Task<ConversionResult>> action)
-		{
-			return AnsiConsole.Status()
-				.Spinner(Spinner.Known.Dots)
-				.SpinnerStyle(Style.Parse("cyan"))
-				.StartAsync(label, _ => action());
 		}
 
 		private static String PromptExistingPath(String label)

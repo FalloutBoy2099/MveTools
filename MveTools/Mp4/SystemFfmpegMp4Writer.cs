@@ -3,13 +3,15 @@ namespace MveTools.Mp4
 	using System;
 	using System.Globalization;
 	using System.IO;
+	using System.Threading;
 	using Avi;
+	using Errors;
 	using IO;
 	using Media;
 
 	public sealed class SystemFfmpegMp4Writer
 	{
-		public void Write(String path, IndexedVideo video, Int32 quality)
+		public void Write(String path, IndexedVideo video, Int32 quality, CancellationToken cancellationToken = default)
 		{
 			FileSystemHelper.EnsureParentDirectory(path);
 
@@ -18,7 +20,7 @@ namespace MveTools.Mp4
 
 			try
 			{
-				new AviDibWriter().WriteRgb24(tempAviPath, video);
+				new AviDibWriter().WriteRgb24(tempAviPath, video, cancellationToken);
 				FfmpegProcess.Run(
 					[
 						"-i", tempAviPath,
@@ -29,10 +31,13 @@ namespace MveTools.Mp4
 						"-movflags", "+faststart",
 						"-c:a", "aac",
 						"-b:a", "192k",
-						path
+						Path.GetFullPath(path)
 					],
 					"MP4/H.264 export",
-					"FFmpeg MP4/H.264 encoding");
+					"FFmpeg MP4/H.264 encoding",
+					MveErrorCode.FfmpegMissingForExport,
+					MveErrorCode.FfmpegExportFailed,
+					cancellationToken);
 			}
 			finally
 			{

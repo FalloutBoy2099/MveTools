@@ -6,51 +6,122 @@ namespace MveTools.Mve
 	using IO;
 	using Media;
 
-	/// <summary>Encodes one frame into a format 0x11 decoding map and video payload.</summary>
-	internal static class MveFrameEncoder
+	/// <summary>How much a frame may differ from the source to get smaller.</summary>
+	/// <param name="Tolerance">Largest per-channel color difference accepted when a block is copied from a previous frame (0 = exact).</param>
+	/// <param name="MaxColors">When 4, 2 or 1, blocks that would cost more than a block of that many colors are reduced to that many colors; 0 keeps every color.</param>
+	internal readonly record struct MveEncodeLevel(Int32 Tolerance, Int32 MaxColors);
+
+	/// <summary>
+	/// Encodes one frame into a format 0x11 decoding map and video payload. The encoder also produces the frame as a
+	/// player will reconstruct it, which is what the following frames must be compared with when the encoding is lossy.
+	/// </summary>
+	internal sealed class MveFrameEncoder
 	{
-		public static void Encode(IndexedVideoFrame frame, Byte[]? previousFrame, Byte[]? secondPreviousFrame, out Byte[] decodeMap, out Byte[] videoPayload)
+		private readonly RgbColor[] palette;
+		private readonly Boolean allowMotion;
+		private readonly MotionIndex motionIndex = new();
+		private readonly Int32[] colorCounts = new Int32[256];
+
+		public MveFrameEncoder(RgbColor[] palette, Boolean allowMotion)
+		{
+			this.palette = palette;
+			this.allowMotion = allowMotion;
+		}
+
+		public void Encode(
+			IndexedVideoFrame frame,
+			Byte[]? previousFrame,
+			Byte[]? secondPreviousFrame,
+			MveEncodeLevel level,
+			out Byte[] decodeMap,
+			out Byte[] videoPayload,
+			out Byte[] reconstruction)
 		{
 			List<Byte> opcodes = [];
 			using MemoryStream videoStream = new();
 			using BinaryWriter videoWriter = new(videoStream);
 			videoWriter.Write(new Byte[14]);
 
+			IndexedVideoFrame working = new(frame.Width, frame.Height, (Byte[])frame.Pixels.Clone());
+			motionIndex.Reset(previousFrame, frame.Width, frame.Height);
+
 			for (Int32 by = 0; by < frame.Height; by += 8)
 			{
 				for (Int32 bx = 0; bx < frame.Width; bx += 8)
 				{
-					EncodeBlock(frame, previousFrame, secondPreviousFrame, bx, by, opcodes, videoWriter);
+					EncodeBlock(working, previousFrame, secondPreviousFrame, level, bx, by, opcodes, videoWriter);
 				}
 			}
 
 			decodeMap = PackNibbles(opcodes);
 			videoPayload = videoStream.ToArray();
-			if (videoPayload.Length > UInt16.MaxValue)
-			{
-				throw new MveFrameTooLargeException(videoPayload.Length);
-			}
+			reconstruction = working.Pixels;
 		}
 
-		private static void EncodeBlock(IndexedVideoFrame frame, Byte[]? previousFrame, Byte[]? secondPreviousFrame, Int32 bx, Int32 by, List<Byte> opcodes, BinaryWriter writer)
+		private void EncodeBlock(IndexedVideoFrame frame, Byte[]? previousFrame, Byte[]? secondPreviousFrame, MveEncodeLevel level, Int32 bx, Int32 by, List<Byte> opcodes, BinaryWriter writer)
 		{
-			if (previousFrame is not null && IsSameAsPrevious(frame, previousFrame, bx, by))
+			// Exact copies first: they cost nothing and keep the reconstruction equal to the source, which also keeps
+			// the following frames easy to match. Approximate copies only come after every exact way has failed.
+			if (previousFrame is not null && CopyBlockIfSimilar(frame, previousFrame, bx, by, 0))
 			{
 				opcodes.Add(MveBlockOpcodes.CopyPrevious);
 				return;
 			}
 
-			if (secondPreviousFrame is not null && IsSameAsPrevious(frame, secondPreviousFrame, bx, by))
+			if (secondPreviousFrame is not null && CopyBlockIfSimilar(frame, secondPreviousFrame, bx, by, 0))
 			{
 				opcodes.Add(MveBlockOpcodes.CopySecondPrevious);
 				return;
 			}
 
-			if (previousFrame is not null && TryEncodeMotionFromPrevious(frame, previousFrame, bx, by, opcodes, writer))
+			if (allowMotion && previousFrame is not null && TryEncodeMotionFromPrevious(frame, bx, by, opcodes, writer))
 			{
 				return;
 			}
 
+			if (level.Tolerance > 0)
+			{
+				if (previousFrame is not null && CopyBlockIfSimilar(frame, previousFrame, bx, by, level.Tolerance))
+				{
+					opcodes.Add(MveBlockOpcodes.CopyPrevious);
+					return;
+				}
+
+				if (secondPreviousFrame is not null && CopyBlockIfSimilar(frame, secondPreviousFrame, bx, by, level.Tolerance))
+				{
+					opcodes.Add(MveBlockOpcodes.CopySecondPrevious);
+					return;
+				}
+			}
+
+			Int32 opcodeCount = opcodes.Count;
+			Int64 position = writer.BaseStream.Position;
+			EncodeBlockContent(frame, bx, by, opcodes, writer);
+			if (level.MaxColors == 0 || writer.BaseStream.Position - position <= CostLimit(level.MaxColors))
+			{
+				return;
+			}
+
+			// Too expensive for this level: reduce the block to a few colors and encode that instead.
+			opcodes.RemoveRange(opcodeCount, opcodes.Count - opcodeCount);
+			writer.BaseStream.SetLength(position);
+			ReduceColors(frame, bx, by, level.MaxColors);
+			EncodeBlockContent(frame, bx, by, opcodes, writer);
+		}
+
+		/// <summary>Bytes of the cheapest encoding of a block that has at most <paramref name="maxColors"/> colors.</summary>
+		private static Int32 CostLimit(Int32 maxColors)
+		{
+			return maxColors switch
+			{
+				1 => 1,
+				2 => 10,
+				_ => 20
+			};
+		}
+
+		private void EncodeBlockContent(IndexedVideoFrame frame, Int32 bx, Int32 by, List<Byte> opcodes, BinaryWriter writer)
+		{
 			if (TryGetSolidColor(frame, bx, by, out Byte solidColor))
 			{
 				opcodes.Add(MveBlockOpcodes.Solid);
@@ -128,86 +199,428 @@ namespace MveTools.Mve
 			}
 		}
 
-		private static Boolean IsSameAsPrevious(IndexedVideoFrame frame, Byte[] previousFrame, Int32 bx, Int32 by)
+		/// <summary>
+		/// Tells whether the block of <paramref name="frame"/> matches the block at the same place in <paramref name="reference"/>
+		/// within <paramref name="tolerance"/>; when it does, the block of the frame is replaced by the reference block.
+		/// </summary>
+		private Boolean CopyBlockIfSimilar(IndexedVideoFrame frame, Byte[] reference, Int32 bx, Int32 by, Int32 tolerance)
 		{
+			Boolean exact = true;
 			for (Int32 y = 0; y < 8; y++)
 			{
+				Int32 rowStart = (by + y) * frame.Width + bx;
 				for (Int32 x = 0; x < 8; x++)
 				{
-					Int32 offset = (by + y) * frame.Width + bx + x;
-					if (frame.Pixels[offset] != previousFrame[offset])
+					Byte value = frame.Pixels[rowStart + x];
+					Byte other = reference[rowStart + x];
+					if (value == other)
+					{
+						continue;
+					}
+
+					exact = false;
+					if (tolerance == 0 || !AreClose(value, other, tolerance))
 					{
 						return false;
 					}
 				}
 			}
 
+			if (!exact)
+			{
+				for (Int32 y = 0; y < 8; y++)
+				{
+					Int32 rowStart = (by + y) * frame.Width + bx;
+					Buffer.BlockCopy(reference, rowStart, frame.Pixels, rowStart, 8);
+				}
+			}
+
 			return true;
 		}
 
-		private static Boolean TryEncodeMotionFromPrevious(IndexedVideoFrame frame, Byte[] previousFrame, Int32 bx, Int32 by, List<Byte> opcodes, BinaryWriter writer)
+		private Boolean AreClose(Byte first, Byte second, Int32 tolerance)
 		{
-			for (Int32 dy = -8; dy <= 7; dy++)
-			{
-				for (Int32 dx = -8; dx <= 7; dx++)
-				{
-					if (dx == 0 && dy == 0)
-					{
-						continue;
-					}
-
-					if (IsSameAsPreviousAt(frame, previousFrame, bx, by, dx, dy))
-					{
-						opcodes.Add(MveBlockOpcodes.SmallMotionFromPrevious);
-						writer.Write((Byte)((dx + 8) | ((dy + 8) << 4)));
-						return true;
-					}
-				}
-			}
-
-			for (Int32 dy = -32; dy <= 31; dy++)
-			{
-				for (Int32 dx = -32; dx <= 31; dx++)
-				{
-					if (dx >= -8 && dx <= 7 && dy >= -8 && dy <= 7)
-					{
-						continue;
-					}
-
-					if (IsSameAsPreviousAt(frame, previousFrame, bx, by, dx, dy))
-					{
-						opcodes.Add(MveBlockOpcodes.MotionFromPrevious);
-						writer.Write(unchecked((Byte)(SByte)dx));
-						writer.Write(unchecked((Byte)(SByte)dy));
-						return true;
-					}
-				}
-			}
-
-			return false;
+			RgbColor a = palette[first];
+			RgbColor b = palette[second];
+			return Math.Abs(a.R - b.R) <= tolerance && Math.Abs(a.G - b.G) <= tolerance && Math.Abs(a.B - b.B) <= tolerance;
 		}
 
-		private static Boolean IsSameAsPreviousAt(IndexedVideoFrame frame, Byte[] previousFrame, Int32 bx, Int32 by, Int32 dx, Int32 dy)
+		/// <summary>Replaces the colors of a block by at most <paramref name="maxColors"/> of its own colors.</summary>
+		private void ReduceColors(IndexedVideoFrame frame, Int32 bx, Int32 by, Int32 maxColors)
 		{
-			Int32 sourceX = bx + dx;
-			Int32 sourceY = by + dy;
-			if (sourceX < 0 || sourceY < 0 || sourceX + 8 > frame.Width || sourceY + 8 > frame.Height)
+			List<Byte> distinct = [];
+			for (Int32 y = 0; y < 8; y++)
+			{
+				for (Int32 x = 0; x < 8; x++)
+				{
+					Byte value = frame.Pixels[(by + y) * frame.Width + bx + x];
+					if (colorCounts[value]++ == 0)
+					{
+						distinct.Add(value);
+					}
+				}
+			}
+
+			try
+			{
+				if (distinct.Count <= maxColors)
+				{
+					return;
+				}
+
+				// Representatives: the most frequent color, then repeatedly the color that is far from the chosen ones and frequent.
+				List<Byte> chosen = [MostFrequent(distinct)];
+				while (chosen.Count < maxColors)
+				{
+					Byte best = chosen[0];
+					Int64 bestScore = -1;
+					foreach (Byte candidate in distinct)
+					{
+						if (chosen.Contains(candidate))
+						{
+							continue;
+						}
+
+						Int32 nearest = Int32.MaxValue;
+						foreach (Byte other in chosen)
+						{
+							nearest = Math.Min(nearest, Distance(candidate, other));
+						}
+
+						Int64 score = (Int64)nearest * colorCounts[candidate];
+						if (score > bestScore)
+						{
+							bestScore = score;
+							best = candidate;
+						}
+					}
+
+					chosen.Add(best);
+				}
+
+				for (Int32 y = 0; y < 8; y++)
+				{
+					for (Int32 x = 0; x < 8; x++)
+					{
+						Int32 offset = (by + y) * frame.Width + bx + x;
+						Byte value = frame.Pixels[offset];
+						Byte replacement = chosen[0];
+						Int32 bestDistance = Int32.MaxValue;
+						foreach (Byte candidate in chosen)
+						{
+							Int32 distance = Distance(value, candidate);
+							if (distance < bestDistance)
+							{
+								bestDistance = distance;
+								replacement = candidate;
+							}
+						}
+
+						frame.Pixels[offset] = replacement;
+					}
+				}
+			}
+			finally
+			{
+				foreach (Byte value in distinct)
+				{
+					colorCounts[value] = 0;
+				}
+			}
+		}
+
+		private Byte MostFrequent(List<Byte> distinct)
+		{
+			Byte best = distinct[0];
+			foreach (Byte candidate in distinct)
+			{
+				if (colorCounts[candidate] > colorCounts[best] || (colorCounts[candidate] == colorCounts[best] && candidate < best))
+				{
+					best = candidate;
+				}
+			}
+
+			return best;
+		}
+
+		private Int32 Distance(Byte first, Byte second)
+		{
+			RgbColor a = palette[first];
+			RgbColor b = palette[second];
+			Int32 dr = a.R - b.R;
+			Int32 dg = a.G - b.G;
+			Int32 db = a.B - b.B;
+			return dr * dr + dg * dg + db * db;
+		}
+
+		private Boolean TryEncodeMotionFromPrevious(IndexedVideoFrame frame, Int32 bx, Int32 by, List<Byte> opcodes, BinaryWriter writer)
+		{
+			UInt64 blockHash = MotionIndex.HashBlock(frame.Pixels, frame.Width, bx, by);
+			if (!motionIndex.TryFind(frame, blockHash, bx, by, out Int32 dx, out Int32 dy, out Boolean small))
 			{
 				return false;
 			}
 
-			for (Int32 y = 0; y < 8; y++)
+			if (small)
 			{
-				for (Int32 x = 0; x < 8; x++)
-				{
-					if (frame.Pixels[(by + y) * frame.Width + bx + x] != previousFrame[(sourceY + y) * frame.Width + sourceX + x])
-					{
-						return false;
-					}
-				}
+				opcodes.Add(MveBlockOpcodes.SmallMotionFromPrevious);
+				writer.Write((Byte)((dx + 8) | ((dy + 8) << 4)));
+			}
+			else
+			{
+				opcodes.Add(MveBlockOpcodes.MotionFromPrevious);
+				writer.Write(unchecked((Byte)(SByte)dx));
+				writer.Write(unchecked((Byte)(SByte)dy));
 			}
 
 			return true;
+		}
+
+		/// <summary>
+		/// Finds where an 8x8 block of the current frame also appears in the previous frame, within 32 pixels. The windows of the previous
+		/// frame are hashed and filed by 64x64 area, so a lookup only visits the few windows that look like the block; every candidate is
+		/// confirmed pixel by pixel. Among the matches, the one the historical scan order would have found first is returned: small
+		/// displacements (-8..7) in row order, then the larger ones.
+		/// </summary>
+		private sealed class MotionIndex
+		{
+			private const UInt64 RowFactor = 0x9E3779B97F4A7C15UL;
+			private const UInt64 ColumnFactor = 0xC2B2AE3D27D4EB4FUL;
+			private const UInt64 SlotFactor = 0xD6E8FEB86659FD93UL;
+			private const Int32 CellShift = 6;
+			private const Int32 Reach = 32;
+			private static readonly UInt64 RowFactorPower7 = Power(RowFactor, 7);
+			private static readonly UInt64 ColumnFactorPower7 = Power(ColumnFactor, 7);
+
+			private Byte[]? previous;
+			private Int32 width;
+			private Int32 height;
+			private Int32 gridWidth;
+			private Int32 cellsPerRow;
+			private Int32 slotBits;
+			private Boolean built;
+			private UInt64[] rowHashes = [];
+			private UInt64[] windowHashes = [];
+			private Int32[] head = [];
+			private Int32[] next = [];
+
+			public void Reset(Byte[]? previousFrame, Int32 frameWidth, Int32 frameHeight)
+			{
+				previous = previousFrame;
+				width = frameWidth;
+				height = frameHeight;
+				built = false;
+			}
+
+			public static UInt64 HashBlock(Byte[] pixels, Int32 frameWidth, Int32 bx, Int32 by)
+			{
+				UInt64 hash = 0;
+				for (Int32 y = 0; y < 8; y++)
+				{
+					UInt64 row = 0;
+					Int32 start = (by + y) * frameWidth + bx;
+					for (Int32 x = 0; x < 8; x++)
+					{
+						row = row * RowFactor + pixels[start + x] + 1UL;
+					}
+
+					hash = hash * ColumnFactor + row;
+				}
+
+				return hash;
+			}
+
+			public Boolean TryFind(IndexedVideoFrame frame, UInt64 blockHash, Int32 bx, Int32 by, out Int32 dx, out Int32 dy, out Boolean small)
+			{
+				dx = 0;
+				dy = 0;
+				small = false;
+				Int32 minX = Math.Max(0, bx - Reach);
+				Int32 maxX = Math.Min(width - 8, bx + Reach - 1);
+				Int32 minY = Math.Max(0, by - Reach);
+				Int32 maxY = Math.Min(height - 8, by + Reach - 1);
+				if (minX > maxX || minY > maxY)
+				{
+					return false;
+				}
+
+				if (!built)
+				{
+					Build();
+				}
+
+				Int32 bestRank = Int32.MaxValue;
+				for (Int32 cellY = minY >> CellShift; cellY <= maxY >> CellShift; cellY++)
+				{
+					for (Int32 cellX = minX >> CellShift; cellX <= maxX >> CellShift; cellX++)
+					{
+						Int32 entry = head[Slot(blockHash, cellY * cellsPerRow + cellX)];
+						while (entry != 0)
+						{
+							Int32 position = entry - 1;
+							entry = next[position];
+							if (windowHashes[position] != blockHash)
+							{
+								continue;
+							}
+
+							Int32 sourceY = Math.DivRem(position, gridWidth, out Int32 sourceX);
+							if (sourceX >> CellShift != cellX || sourceY >> CellShift != cellY
+								|| sourceX < minX || sourceX > maxX || sourceY < minY || sourceY > maxY)
+							{
+								continue;
+							}
+
+							Int32 shiftX = sourceX - bx;
+							Int32 shiftY = sourceY - by;
+							if (shiftX == 0 && shiftY == 0)
+							{
+								continue;
+							}
+
+							Int32 rank = Rank(shiftX, shiftY);
+							if (rank >= bestRank || !PixelsEqual(frame.Pixels, bx, by, sourceX, sourceY))
+							{
+								continue;
+							}
+
+							bestRank = rank;
+							dx = shiftX;
+							dy = shiftY;
+						}
+					}
+				}
+
+				if (bestRank == Int32.MaxValue)
+				{
+					return false;
+				}
+
+				small = bestRank < 256;
+				return true;
+			}
+
+			/// <summary>Position of a displacement in the scan order: small displacements first, each group in row order.</summary>
+			private static Int32 Rank(Int32 dx, Int32 dy)
+			{
+				return dx is >= -8 and <= 7 && dy is >= -8 and <= 7
+					? (dy + 8) * 16 + dx + 8
+					: 256 + (dy + Reach) * 2 * Reach + dx + Reach;
+			}
+
+			private Boolean PixelsEqual(Byte[] pixels, Int32 bx, Int32 by, Int32 sourceX, Int32 sourceY)
+			{
+				for (Int32 y = 0; y < 8; y++)
+				{
+					Int32 target = (by + y) * width + bx;
+					Int32 source = (sourceY + y) * width + sourceX;
+					for (Int32 x = 0; x < 8; x++)
+					{
+						if (pixels[target + x] != previous![source + x])
+						{
+							return false;
+						}
+					}
+				}
+
+				return true;
+			}
+
+			private Int32 Slot(UInt64 hash, Int32 cell)
+			{
+				return (Int32)(((hash ^ ((UInt64)cell * RowFactor)) * SlotFactor) >> (64 - slotBits));
+			}
+
+			private void Build()
+			{
+				gridWidth = width - 7;
+				Int32 gridHeight = height - 7;
+				Int32 positions = gridWidth * gridHeight;
+				cellsPerRow = ((width - 8) >> CellShift) + 1;
+				if (rowHashes.Length < height * gridWidth)
+				{
+					rowHashes = new UInt64[height * gridWidth];
+				}
+
+				if (windowHashes.Length < positions)
+				{
+					windowHashes = new UInt64[positions];
+					next = new Int32[positions];
+				}
+
+				Byte[] pixels = previous!;
+				for (Int32 y = 0; y < height; y++)
+				{
+					Int32 start = y * width;
+					UInt64 hash = 0;
+					for (Int32 x = 0; x < 8; x++)
+					{
+						hash = hash * RowFactor + pixels[start + x] + 1UL;
+					}
+
+					rowHashes[y * gridWidth] = hash;
+					for (Int32 x = 1; x < gridWidth; x++)
+					{
+						hash = (hash - (pixels[start + x - 1] + 1UL) * RowFactorPower7) * RowFactor + pixels[start + x + 7] + 1UL;
+						rowHashes[y * gridWidth + x] = hash;
+					}
+				}
+
+				for (Int32 x = 0; x < gridWidth; x++)
+				{
+					UInt64 hash = 0;
+					for (Int32 y = 0; y < 8; y++)
+					{
+						hash = hash * ColumnFactor + rowHashes[y * gridWidth + x];
+					}
+
+					windowHashes[x] = hash;
+					for (Int32 y = 1; y < gridHeight; y++)
+					{
+						hash = (hash - rowHashes[(y - 1) * gridWidth + x] * ColumnFactorPower7) * ColumnFactor + rowHashes[(y + 7) * gridWidth + x];
+						windowHashes[y * gridWidth + x] = hash;
+					}
+				}
+
+				slotBits = 12;
+				while ((1 << slotBits) < positions * 2)
+				{
+					slotBits++;
+				}
+
+				if (head.Length != 1 << slotBits)
+				{
+					head = new Int32[1 << slotBits];
+				}
+				else
+				{
+					Array.Clear(head);
+				}
+
+				for (Int32 y = 0; y < gridHeight; y++)
+				{
+					for (Int32 x = 0; x < gridWidth; x++)
+					{
+						Int32 position = y * gridWidth + x;
+						Int32 slot = Slot(windowHashes[position], (y >> CellShift) * cellsPerRow + (x >> CellShift));
+						next[position] = head[slot];
+						head[slot] = position + 1;
+					}
+				}
+
+				built = true;
+			}
+
+			private static UInt64 Power(UInt64 value, Int32 exponent)
+			{
+				UInt64 result = 1;
+				for (Int32 i = 0; i < exponent; i++)
+				{
+					result *= value;
+				}
+
+				return result;
+			}
 		}
 
 		private static Boolean TryGetSolidColor(IndexedVideoFrame frame, Int32 bx, Int32 by, out Byte color)

@@ -2,6 +2,7 @@ namespace MveTools.Mve
 {
 	using System;
 	using System.IO;
+	using Errors;
 
 	internal sealed class MveBlockDecoder
 	{
@@ -74,7 +75,7 @@ namespace MveTools.Mve
 					DecodeDither(blockX, blockY);
 					break;
 				default:
-					throw new InvalidDataException($"Unknown MVE block opcode 0x{opcode:X}.");
+					throw new InvalidDataException($"Unknown MVE block opcode 0x{opcode:X}.").Tag(MveErrorCode.UnknownBlockOpcode, opcode);
 			}
 		}
 

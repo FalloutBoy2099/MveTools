@@ -38,9 +38,14 @@ namespace MveTools.Cli
 					_ => ConsoleOutput.Fail(AppText.Format("UnknownCommand", args[0]))
 				};
 			}
+			catch (OperationCanceledException)
+			{
+				ConsoleOutput.WriteError(AppText.Get("Cancelled"));
+				return 130;
+			}
 			catch (Exception ex)
 			{
-				ConsoleOutput.WriteError(ex.Message);
+				ConsoleOutput.WriteError(AppText.DescribeError(ex));
 				return 1;
 			}
 		}

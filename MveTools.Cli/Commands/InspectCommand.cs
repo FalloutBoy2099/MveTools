@@ -14,12 +14,13 @@ namespace MveTools.Cli.Commands
 				return 0;
 			}
 
-			if (args.Length < 2)
+			ParsedArguments parsed = new ArgumentParser([]).Parse(args, 1);
+			if (!CliArguments.HasPositionals(parsed, 1))
 			{
 				return ConsoleOutput.Fail(AppText.Get("UsageInspect"));
 			}
 
-			MveFileInfo info = new MveFileInspector().Inspect(args[1]);
+			MveFileInfo info = new MveFileInspector().Inspect(parsed.Positionals[0]);
 			ConsoleOutput.WriteInspection(info);
 			return 0;
 		}

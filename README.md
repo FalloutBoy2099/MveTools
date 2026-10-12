@@ -32,7 +32,9 @@ FFmpeg install examples:
 - Windows: `winget install Gyan.FFmpeg`
 - Debian/Ubuntu: `sudo apt install ffmpeg`
 - macOS: `brew install ffmpeg`
-For `to-mve`, source width, height, and frame rate are detected from the video stream unless `--width`, `--height`, or `--fps` is explicitly provided. AVI is read directly. MP4, M4V, and MOV are imported through the system `ffmpeg` command into a temporary uncompressed AVI before MVE encoding. Dimensions are adjusted to MVE 8x8 blocks, and very detailed frames are downscaled automatically when they exceed the MVE payload limit. The CLI exposes conversion options such as `--test`, `--no-audio`/`-ns`, `--audio-source`/`-w`, `--audio-rate`, `--palette`/`-p`, `--save-palette`, `--start`, `--end`, `--len`, `--old`, `--hq`, `--rate`, `--size`, `--dither`, and `--no-overwrite`. The integrated encoder records `--rate`, `--size`, `--old`, and `--hq` as conversion intent; it does not use external lossy bitrate fitting.
+For `to-mve`, source width, height, and frame rate are detected from the video stream unless `--width`, `--height`, or `--fps` is explicitly provided. AVI is read directly. MP4, M4V, and MOV are imported through the system `ffmpeg` command into a temporary uncompressed AVI before MVE encoding. Dimensions are adjusted to MVE 8x8 blocks. `--width` and `--height` rescale the video (nearest neighbor; the one that is not given is unchanged). A frame too detailed for the MVE frame size limit (64 KiB) keeps its resolution: its blocks are reduced to 4, 2 or 1 colors as needed, and the video is only halved if even that is not enough. `--rate <KiB/s>` and `--size <MiB>` set a size target: the encoder raises the difference it tolerates between a block and the same block of an earlier frame until the file fits, and reports the result (if the target is out of reach, the smallest result is kept). `--old` disables the motion search (faster, larger files) and `--hq` lowers the largest difference the encoder may tolerate. The CLI exposes conversion options such as `--test`, `--no-audio`/`-ns`, `--audio-source`/`-w`, `--audio-rate`, `--palette`/`-p`, `--save-palette`, `--start`, `--end`, `--len`, `--old`, `--hq`, `--rate`, `--size`, `--dither`, and `--no-overwrite`.
+
+Command line arguments are checked strictly: an unknown option, a missing or invalid value, a repeated option, or conflicting options (`--rate`/`--size`, `--end`/`--len`, `--old`/`--hq`) is an error. Ctrl+C cancels a running conversion and removes the partial output file. `--palette` also applies to 8 bpp AVI sources: their pixels are remapped to the closest colors of the given palette.
 
 ## Library
 
@@ -64,10 +66,6 @@ namespace Sample
 ```
 
 Supported runtime identifiers are `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, and `linux-arm64`. Files published from Windows for Linux or macOS are not marked executable; run `chmod +x` after copying them.
-
-## Tests
-
-`dotnet test` runs the unit tests. `CharacterizationTests` compare the exact output of the MVE/AVI/WAV writers and the converter pipeline with the values recorded in `MveTools.Tests\golden.txt`; after an intentional format change, re-record them by setting the `MVETOOLS_UPDATE_GOLDEN` environment variable for one test run.
 
 ## Notes
 

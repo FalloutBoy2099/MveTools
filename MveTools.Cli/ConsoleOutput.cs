@@ -87,9 +87,9 @@ namespace MveTools.Cli
 			if (!IsInteractive())
 			{
 				Console.WriteLine($"{AppText.Get("Output")}: {result.OutputPath}");
-				foreach (String step in result.Steps)
+				foreach (ConversionMessage message in result.Messages)
 				{
-					Console.WriteLine(AppText.LocalizeStep(step));
+					Console.WriteLine(AppText.LocalizeMessage(message));
 				}
 
 				return;
@@ -99,9 +99,9 @@ namespace MveTools.Cli
 
 			Table table = new Table().Border(TableBorder.Rounded);
 			table.AddColumn(AppText.Get("Step"));
-			foreach (String step in result.Steps)
+			foreach (ConversionMessage message in result.Messages)
 			{
-				table.AddRow(Markup.Escape(AppText.LocalizeStep(step)));
+				table.AddRow(Markup.Escape(AppText.LocalizeMessage(message)));
 			}
 
 			AnsiConsole.Write(table);

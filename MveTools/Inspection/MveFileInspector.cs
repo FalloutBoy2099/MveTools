@@ -4,6 +4,7 @@ namespace MveTools.Inspection
 	using System.Buffers.Binary;
 	using System.Collections.Generic;
 	using System.IO;
+	using Errors;
 	using Mve;
 
 	public sealed class MveFileInspector
@@ -15,7 +16,7 @@ namespace MveTools.Inspection
 		{
 			if (!File.Exists(path))
 			{
-				throw new FileNotFoundException("MVE file does not exist.", path);
+				throw new FileNotFoundException("MVE file does not exist.", path).Tag(MveErrorCode.MveFileMissing, path);
 			}
 
 			using FileStream stream = File.OpenRead(path);
@@ -25,13 +26,13 @@ namespace MveTools.Inspection
 			Byte[] expectedHeader = MveFormat.CreateHeaderBytes();
 			if (headerBytes.Length != 20 || !headerBytes.SequenceEqual(expectedHeader))
 			{
-				throw new InvalidDataException("The file does not start with an Interplay MVE header.");
+				throw new InvalidDataException("The file does not start with an Interplay MVE header.").Tag(MveErrorCode.NotMveFile);
 			}
 
 			Byte[] magicWords = reader.ReadBytes(6);
 			if (magicWords.Length != 6)
 			{
-				throw new InvalidDataException("The MVE header is truncated.");
+				throw new InvalidDataException("The MVE header is truncated.").Tag(MveErrorCode.MveHeaderTruncated);
 			}
 
 			List<MveChunkInfo> chunks = [];
@@ -40,7 +41,7 @@ namespace MveTools.Inspection
 				Int64 chunkOffset = stream.Position;
 				if (stream.Length - stream.Position < 4)
 				{
-					throw new InvalidDataException($"Truncated chunk preamble at offset {chunkOffset}.");
+					throw new InvalidDataException($"Truncated chunk preamble at offset {chunkOffset}.").Tag(MveErrorCode.MveChunkPreambleTruncated, chunkOffset);
 				}
 
 				UInt16 length = reader.ReadUInt16();
@@ -49,7 +50,7 @@ namespace MveTools.Inspection
 				Int64 dataEnd = dataStart + length;
 				if (dataEnd > stream.Length)
 				{
-					throw new InvalidDataException($"Chunk at offset {chunkOffset} exceeds file length.");
+					throw new InvalidDataException($"Chunk at offset {chunkOffset} exceeds file length.").Tag(MveErrorCode.MveChunkExceedsFile, chunkOffset);
 				}
 
 				List<MveOpcodeInfo> opcodes = [];
@@ -58,7 +59,7 @@ namespace MveTools.Inspection
 					Int64 opcodeOffset = stream.Position;
 					if (dataEnd - stream.Position < 4)
 					{
-						throw new InvalidDataException($"Truncated opcode preamble at offset {opcodeOffset}.");
+						throw new InvalidDataException($"Truncated opcode preamble at offset {opcodeOffset}.").Tag(MveErrorCode.MveOpcodePreambleTruncated, opcodeOffset);
 					}
 
 					Byte[] opcodePreamble = reader.ReadBytes(4);
@@ -68,7 +69,7 @@ namespace MveTools.Inspection
 					Int64 payloadEnd = stream.Position + opcodeLength;
 					if (payloadEnd > dataEnd)
 					{
-						throw new InvalidDataException($"Opcode at offset {opcodeOffset} exceeds its containing chunk.");
+						throw new InvalidDataException($"Opcode at offset {opcodeOffset} exceeds its containing chunk.").Tag(MveErrorCode.MveOpcodeExceedsChunk, opcodeOffset);
 					}
 
 					opcodes.Add(new MveOpcodeInfo(opcodeOffset, opcodeLength, opcodeType, opcodeVersion));

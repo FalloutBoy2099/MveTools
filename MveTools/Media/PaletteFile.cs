@@ -2,6 +2,7 @@ namespace MveTools.Media
 {
 	using System;
 	using System.IO;
+	using Errors;
 	using IO;
 
 	public static class PaletteFile
@@ -23,7 +24,7 @@ namespace MveTools.Media
 			Byte[] data = File.ReadAllBytes(path);
 			if (data.Length < 768)
 			{
-				throw new InvalidDataException("Palette file must contain at least 768 RGB bytes.");
+				throw new InvalidDataException("Palette file must contain at least 768 RGB bytes.").Tag(MveErrorCode.PaletteFileTooSmall);
 			}
 
 			Int32 offset = data.Length >= 772 && data[0] == (Byte)'R' && data[1] == (Byte)'I' && data[2] == (Byte)'F' && data[3] == (Byte)'F'

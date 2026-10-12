@@ -2,15 +2,40 @@ namespace MveTools.Conversion
 {
 	using System;
 	using System.IO;
+	using System.Threading;
 	using Audio;
 	using Avi;
+	using Errors;
 	using IO;
 	using Media;
 	using Mp4;
 
 	internal static class VideoSourceReader
 	{
-		public readonly record struct Result(IndexedVideo Video, String Step);
+		/// <summary>The video read from a source file. The frames are decoded on demand, so the result must stay alive while the video is used.</summary>
+		public sealed class Result : IDisposable
+		{
+			private readonly String? temporaryDirectory;
+
+			public Result(IndexedVideo video, ConversionMessage message, String? temporaryDirectory = null)
+			{
+				Video = video;
+				Message = message;
+				this.temporaryDirectory = temporaryDirectory;
+			}
+
+			public IndexedVideo Video { get; }
+
+			public ConversionMessage Message { get; }
+
+			public void Dispose()
+			{
+				if (temporaryDirectory is not null)
+				{
+					FileSystemHelper.TryDeleteDirectory(temporaryDirectory);
+				}
+			}
+		}
 
 		public static Boolean IsAvi(String path)
 		{
@@ -23,42 +48,45 @@ namespace MveTools.Conversion
 			return extension is ".mp4" or ".m4v" or ".mov";
 		}
 
-		public static Result ReadVideo(String inputPath, RgbColor[]? customPalette, Boolean useFloydSteinbergDither)
+		public static Result ReadVideo(String inputPath, RgbColor[]? customPalette, Boolean useFloydSteinbergDither, CancellationToken cancellationToken)
 		{
 			AviReadOptions readOptions = new()
 			{
 				Palette = customPalette,
-				UseFloydSteinbergDither = useFloydSteinbergDither
+				UseFloydSteinbergDither = useFloydSteinbergDither,
+				LazyFrames = true
 			};
 
 			if (IsAvi(inputPath))
 			{
 				return new Result(
-					new AviDibReader().Read(inputPath, readOptions),
-					"Read AVI DIB and PCM audio with integrated reader");
+					new AviDibReader().Read(inputPath, readOptions, cancellationToken),
+					new ConversionMessage(ConversionMessageCode.ReadAvi));
 			}
 
 			if (!IsFfmpegVideoSource(inputPath))
 			{
-				throw new NotSupportedException("Video to MVE supports uncompressed AVI and FFmpeg-readable MP4/M4V/MOV sources.");
+				throw new NotSupportedException("Video to MVE supports uncompressed AVI and FFmpeg-readable MP4/M4V/MOV sources.").Tag(MveErrorCode.VideoSourceNotSupported);
 			}
 
 			String tempDirectory = FileSystemHelper.CreateTempDirectory();
-			String tempAviPath = Path.Combine(tempDirectory, "source.avi");
 			try
 			{
-				new SystemFfmpegVideoTranscoder().TranscodeToUncompressedAvi(inputPath, tempAviPath);
+				String tempAviPath = Path.Combine(tempDirectory, "source.avi");
+				new SystemFfmpegVideoTranscoder().TranscodeToUncompressedAvi(inputPath, tempAviPath, cancellationToken);
 				return new Result(
-					new AviDibReader().Read(tempAviPath, readOptions),
-					"Converted source video to temporary uncompressed AVI with system FFmpeg and read it with integrated reader");
+					new AviDibReader().Read(tempAviPath, readOptions, cancellationToken),
+					new ConversionMessage(ConversionMessageCode.ConvertedSource),
+					tempDirectory);
 			}
-			finally
+			catch
 			{
 				FileSystemHelper.TryDeleteDirectory(tempDirectory);
+				throw;
 			}
 		}
 
-		public static PcmAudioTrack ReadExternalAudio(String path)
+		public static PcmAudioTrack ReadExternalAudio(String path, CancellationToken cancellationToken)
 		{
 			String extension = Path.GetExtension(path).ToLowerInvariant();
 			if (extension == ".wav")
@@ -68,11 +96,11 @@ namespace MveTools.Conversion
 
 			if (extension == ".avi")
 			{
-				IndexedVideo source = new AviDibReader().Read(path);
-				return source.Audio ?? throw new NotSupportedException("The external AVI does not contain supported PCM audio.");
+				IndexedVideo source = new AviDibReader().Read(path, new AviReadOptions { LazyFrames = true }, cancellationToken);
+				return source.Audio ?? throw new NotSupportedException("The external AVI does not contain supported PCM audio.").Tag(MveErrorCode.ExternalAviWithoutAudio);
 			}
 
-			throw new NotSupportedException("Integrated external audio supports PCM WAV and uncompressed AVI PCM audio.");
+			throw new NotSupportedException("Integrated external audio supports PCM WAV and uncompressed AVI PCM audio.").Tag(MveErrorCode.ExternalAudioNotSupported);
 		}
 	}
 }

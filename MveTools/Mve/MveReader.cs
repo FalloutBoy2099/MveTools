@@ -3,13 +3,18 @@ namespace MveTools.Mve
 	using System;
 	using System.Collections.Generic;
 	using System.IO;
+	using System.Threading;
+	using Errors;
 	using IO;
 	using Inspection;
 	using Media;
 
 	public sealed class MveReader
 	{
-		public IndexedVideo Read(String path)
+		private const Int64 MaxPixels = 100_000_000;
+		private const Int32 MaxSilenceBytes = 256 * 1024 * 1024;
+
+		public IndexedVideo Read(String path, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
 		{
 			using FileStream stream = File.OpenRead(path);
 			using BinaryReader reader = new(stream);
@@ -17,7 +22,7 @@ namespace MveTools.Mve
 			Byte[] headerBytes = reader.ReadBytes(20);
 			if (!headerBytes.SequenceEqual(MveFormat.CreateHeaderBytes()))
 			{
-				throw new InvalidDataException("The file does not start with an Interplay MVE header.");
+				throw new InvalidDataException("The file does not start with an Interplay MVE header.").Tag(MveErrorCode.NotMveFile);
 			}
 
 			_ = reader.ReadBytes(6);
@@ -38,6 +43,8 @@ namespace MveTools.Mve
 
 			while (stream.Position + 4 <= stream.Length)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
+				progress?.Report(stream.Position / (Double)stream.Length);
 				UInt16 chunkLength = reader.ReadUInt16();
 				UInt16 chunkType = reader.ReadUInt16();
 				Int64 chunkEnd = stream.Position + chunkLength;
@@ -47,7 +54,13 @@ namespace MveTools.Mve
 					UInt16 opcodeLength = reader.ReadUInt16();
 					Byte opcodeType = reader.ReadByte();
 					Byte opcodeVersion = reader.ReadByte();
+					Int64 payloadOffset = stream.Position;
 					Byte[] payload = reader.ReadBytes(opcodeLength);
+					if (payload.Length != opcodeLength)
+					{
+						throw new InvalidDataException($"The MVE opcode at offset {payloadOffset - 4} is truncated.").Tag(MveErrorCode.MveOpcodeTruncated, payloadOffset - 4);
+					}
+
 
 					switch (opcodeType)
 					{
@@ -68,6 +81,10 @@ namespace MveTools.Mve
 							{
 								width = BitConverter.ToUInt16(payload, 0) * 8;
 								height = BitConverter.ToUInt16(payload, 2) * 8;
+								if ((Int64)width * height > MaxPixels)
+								{
+									throw new InvalidDataException($"The MVE frame size {width}x{height} is not supported.").Tag(MveErrorCode.MveInvalidDimensions, width, height);
+								}
 							}
 							break;
 						case MveOpcodes.SetPalette:
@@ -102,7 +119,7 @@ namespace MveTools.Mve
 
 			if (frames.Count == 0)
 			{
-				throw new NotSupportedException("No supported video frame was found.");
+				throw new NotSupportedException("No supported video frame was found.").Tag(MveErrorCode.NoVideoFrames);
 			}
 
 			PcmAudioTrack? audio = audioSampleRate > 0 && audioChannels > 0 && audioSamples.Length > 0
@@ -129,7 +146,7 @@ namespace MveTools.Mve
 		{
 			if (payload.Length < 6)
 			{
-				throw new InvalidDataException("Audio initialization payload is truncated.");
+				throw new InvalidDataException("Audio initialization payload is truncated.").Tag(MveErrorCode.AudioInitTruncated);
 			}
 
 			UInt16 flags = BitConverter.ToUInt16(payload, 2);
@@ -155,7 +172,7 @@ namespace MveTools.Mve
 
 			if (payload.Length < 6)
 			{
-				throw new InvalidDataException("PCM audio payload is truncated.");
+				throw new InvalidDataException("PCM audio payload is truncated.").Tag(MveErrorCode.PcmAudioTruncated);
 			}
 
 			if (bits == 16)
@@ -185,7 +202,12 @@ namespace MveTools.Mve
 				return;
 			}
 
-			Int32 pcm16Bytes = bits == 8 ? byteCount * 2 : byteCount;
+			Int64 pcm16Bytes = bits == 8 ? (Int64)byteCount * 2 : byteCount;
+			if (pcm16Bytes > MaxSilenceBytes)
+			{
+				throw new InvalidDataException($"The MVE silence block of {byteCount} bytes is too large.").Tag(MveErrorCode.MveSilenceTooLarge, byteCount);
+			}
+
 			output.Write(new Byte[pcm16Bytes]);
 		}
 
@@ -193,12 +215,12 @@ namespace MveTools.Mve
 		{
 			if (decodingMap is null)
 			{
-				throw new InvalidDataException("Format 0x11 MVE frame is missing its decoding map.");
+				throw new InvalidDataException("Format 0x11 MVE frame is missing its decoding map.").Tag(MveErrorCode.FrameMissingDecodingMap);
 			}
 
 			if (payload.Length < 14)
 			{
-				throw new InvalidDataException("Format 0x11 MVE video payload is missing its 14-byte preamble.");
+				throw new InvalidDataException("Format 0x11 MVE video payload is missing its 14-byte preamble.").Tag(MveErrorCode.FramePayloadMissingPreamble);
 			}
 
 			Byte[] pixels = new Byte[width * height];
@@ -218,7 +240,7 @@ namespace MveTools.Mve
 					}
 					catch (Exception ex) when (ex is EndOfStreamException or InvalidDataException)
 					{
-						throw new InvalidDataException($"Failed to decode MVE format 0x11 block ({x},{y}) opcode 0x{opcode:X}: {ex.Message}", ex);
+						throw new InvalidDataException($"Failed to decode MVE format 0x11 block ({x},{y}) opcode 0x{opcode:X}: {ex.Message}", ex).Tag(MveErrorCode.BlockDecodeFailed, x, y, opcode, ex.Message);
 					}
 				}
 			}
@@ -230,13 +252,13 @@ namespace MveTools.Mve
 		{
 			if (width <= 0 || height <= 0)
 			{
-				throw new InvalidDataException("Video dimensions were not initialized before video data.");
+				throw new InvalidDataException("Video dimensions were not initialized before video data.").Tag(MveErrorCode.VideoDimensionsNotInitialized);
 			}
 
 			Int32 blocks = width / 8 * (height / 8);
 			if (decodingMap is null || decodingMap.Length < blocks * 2)
 			{
-				throw new InvalidDataException("Raw MVE frame is missing its decoding map.");
+				throw new InvalidDataException("Raw MVE frame is missing its decoding map.").Tag(MveErrorCode.RawFrameMissingDecodingMap);
 			}
 
 			Byte[] pixels = new Byte[width * height];
@@ -250,14 +272,14 @@ namespace MveTools.Mve
 					mapOffset += 2;
 					if (opcode != 0)
 					{
-						throw new NotSupportedException($"Only raw block opcode 0 is supported by the integrated decoder. Found 0x{opcode:X4}.");
+						throw new NotSupportedException($"Only raw block opcode 0 is supported by the integrated decoder. Found 0x{opcode:X4}.").Tag(MveErrorCode.RawOpcodeNotSupported, opcode);
 					}
 
 					for (Int32 y = 0; y < 8; y++)
 					{
 						if (sourceOffset + 8 > payload.Length)
 						{
-							throw new InvalidDataException("Raw MVE video payload is truncated.");
+							throw new InvalidDataException("Raw MVE video payload is truncated.").Tag(MveErrorCode.RawPayloadTruncated);
 						}
 
 						Buffer.BlockCopy(payload, sourceOffset, pixels, (by + y) * width + bx, 8);

@@ -3,22 +3,23 @@ namespace MveTools.Avi
 	using System;
 	using System.Collections.Generic;
 	using System.IO;
+	using System.Threading;
 	using IO;
 	using Media;
 
 	public sealed class AviDibWriter
 	{
-		public void Write(String path, IndexedVideo video)
+		public void Write(String path, IndexedVideo video, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
 		{
-			Write(path, video, AviPixelFormat.Indexed8);
+			Write(path, video, AviPixelFormat.Indexed8, cancellationToken, progress);
 		}
 
-		public void WriteRgb24(String path, IndexedVideo video)
+		public void WriteRgb24(String path, IndexedVideo video, CancellationToken cancellationToken = default, IProgress<Double>? progress = null)
 		{
-			Write(path, video, AviPixelFormat.Rgb24);
+			Write(path, video, AviPixelFormat.Rgb24, cancellationToken, progress);
 		}
 
-		private static void Write(String path, IndexedVideo video, AviPixelFormat pixelFormat)
+		private static void Write(String path, IndexedVideo video, AviPixelFormat pixelFormat, CancellationToken cancellationToken, IProgress<Double>? progress)
 		{
 			FileSystemHelper.EnsureParentDirectory(path);
 
@@ -56,8 +57,10 @@ namespace MveTools.Avi
 			List<(String Id, UInt32 Offset, UInt32 Size)> index = [];
 			Byte[] paddedFrame = new Byte[frameSize];
 
+			Int32 frameIndex = 0;
 			foreach (IndexedVideoFrame frame in video.Frames)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				Int64 chunkStart = stream.Position;
 				writer.WriteAscii("00db");
 				writer.WriteInt32LittleEndian(frameSize);
@@ -66,6 +69,8 @@ namespace MveTools.Avi
 				writer.Write(paddedFrame);
 				index.Add(("00db", (UInt32)(chunkStart - moviListStart - 8), (UInt32)frameSize));
 				PadWord(writer);
+				frameIndex++;
+				progress?.Report(frameIndex / (Double)video.Frames.Count);
 			}
 
 			if (audio is not null && audio.Samples.Length > 0)

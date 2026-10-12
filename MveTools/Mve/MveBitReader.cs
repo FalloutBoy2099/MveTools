@@ -2,6 +2,7 @@ namespace MveTools.Mve
 {
 	using System;
 	using System.IO;
+	using Errors;
 
 	internal sealed class MveBitReader
 	{
@@ -19,7 +20,7 @@ namespace MveTools.Mve
 		{
 			if (BitsLeft < 4)
 			{
-				throw new InvalidDataException("MVE decoding map is truncated.");
+				throw new InvalidDataException("MVE decoding map is truncated.").Tag(MveErrorCode.DecodingMapTruncated);
 			}
 
 			Int32 byteIndex = bitOffset / 8;
